@@ -5,11 +5,12 @@ import sqlite3
 import uuid
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Any
 
 from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
-from database import get_connection
+from database import get_connection, process_write_lock
 
 
 STATUSES = {"Scheduled", "Running", "Finished", "Cancelled"}
@@ -25,6 +26,15 @@ class MeetingError(Exception):
         super().__init__(message)
         if status_code is not None:
             self.status_code = status_code
+
+
+def with_process_write_lock(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        with process_write_lock():
+            return function(*args, **kwargs)
+
+    return wrapper
 
 
 def utc_now() -> datetime:
@@ -370,6 +380,7 @@ def _select_meeting_for_room(meetings: list[dict[str, Any]]) -> dict[str, Any] |
     return sorted(fallback, key=lambda item: (item[0], item[1]), reverse=True)[0][2]
 
 
+@with_process_write_lock
 def list_meetings(status: str | None = None) -> list[dict[str, Any]]:
     with get_connection() as conn:
         if status and status not in STATUSES:
@@ -390,6 +401,7 @@ def list_meetings(status: str | None = None) -> list[dict[str, Any]]:
     return public_meetings
 
 
+@with_process_write_lock
 def get_meeting(meeting_id: int) -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
@@ -402,6 +414,7 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
     return public_meeting(meeting)
 
 
+@with_process_write_lock
 def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
     title = str(payload.get("title", "")).strip()
     host_name = str(payload.get("hostName") or payload.get("host_name") or "").strip()
@@ -508,6 +521,7 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+@with_process_write_lock
 def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
@@ -604,6 +618,7 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     return public_meeting(meeting, include_password=new_password)
 
 
+@with_process_write_lock
 def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
     normalized_scope = str(scope or "single").strip().lower()
     if normalized_scope in {"", "meeting", "one"}:
@@ -641,6 +656,7 @@ def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
     return {"id": meeting_id, "deleted": True}
 
 
+@with_process_write_lock
 def get_meeting_by_room(room_id: str) -> dict[str, Any] | None:
     with get_connection() as conn:
         rows = conn.execute(
@@ -660,6 +676,7 @@ def get_meeting_by_room(room_id: str) -> dict[str, Any] | None:
         return meeting
 
 
+@with_process_write_lock
 def get_meeting_for_reservation(meeting_id: int) -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
@@ -705,6 +722,7 @@ def public_join_meeting(room_id: str) -> dict[str, Any]:
     return payload
 
 
+@with_process_write_lock
 def verify_join_password(
     room_id: str,
     password: str | None,
@@ -736,6 +754,7 @@ def verify_join_password(
     return {"jitsiUrl": meeting["meeting_url"]}
 
 
+@with_process_write_lock
 def log_access(
     room_id: str,
     meeting_id: int | None,
@@ -764,6 +783,7 @@ def log_access(
         )
 
 
+@with_process_write_lock
 def allocate_conference(
     room_name: str,
     mail_owner: str | None,
@@ -827,6 +847,7 @@ def allocate_conference(
     return 201, reservation_payload(dict(row))
 
 
+@with_process_write_lock
 def finish_conference(meeting_id: int) -> dict[str, Any]:
     now = isoformat(utc_now())
     with get_connection() as conn:

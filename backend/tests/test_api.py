@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import re
 import sqlite3
@@ -96,6 +97,27 @@ def test_deleted_meeting_is_removed_and_rejected_by_reservation(client):
     response = client.post("/conference", data={"name": created["roomId"]})
     assert response.status_code == 403
     assert response.get_json()["message"] == "会议不存在"
+
+
+def test_create_meeting_uses_process_write_lock(client, monkeypatch):
+    import services
+
+    lock_events = []
+
+    @contextmanager
+    def recording_lock():
+        lock_events.append("enter")
+        try:
+            yield
+        finally:
+            lock_events.append("exit")
+
+    monkeypatch.setattr(services, "process_write_lock", recording_lock)
+
+    response = client.post("/api/meetings", json={"title": "进程锁测试", "hostName": "Alice"})
+
+    assert response.status_code == 201
+    assert lock_events == ["enter", "exit"]
 
 
 def test_meeting_status_is_derived_from_time_window(client):
@@ -264,6 +286,8 @@ def test_init_db_migrates_existing_meetings_table(tmp_path, monkeypatch):
     from database import init_db
 
     init_db()
+
+    assert Path(f"{db_path}.lock").exists()
 
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}

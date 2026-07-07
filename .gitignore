@@ -4,7 +4,8 @@ frontend/dist/
 backend/instance/
 backend/.env
 *.log
+*.sqlite3.lock
+*.db.lock
 __pycache__/
 .pytest_cache/
 .DS_Store
-

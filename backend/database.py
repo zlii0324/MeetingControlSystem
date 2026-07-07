@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import sqlite3
+import threading
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Generator, Iterable
 
 from config import config
 
+
+_WRITE_LOCK_MUTEX = threading.RLock()
+_WRITE_LOCK_STATE = threading.local()
 
 MEETING_COLUMNS = [
     "id",
@@ -115,6 +121,34 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def database_lock_path() -> Path:
+    return Path(f"{config.database_path}.lock")
+
+
+@contextmanager
+def process_write_lock() -> Generator[None, None, None]:
+    depth = getattr(_WRITE_LOCK_STATE, "depth", 0)
+    if depth:
+        _WRITE_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _WRITE_LOCK_STATE.depth -= 1
+        return
+
+    lock_path = database_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _WRITE_LOCK_MUTEX:
+        with lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _WRITE_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _WRITE_LOCK_STATE.depth = 0
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _meeting_columns(conn: sqlite3.Connection) -> set[str]:
     return {
         row["name"]
@@ -170,6 +204,11 @@ def _recreate_meetings_without_unique_room_id(
 
 
 def init_db() -> None:
+    with process_write_lock():
+        _init_db_locked()
+
+
+def _init_db_locked() -> None:
     with get_connection() as conn:
         conn.executescript(
             _create_meetings_table_sql("meetings")
