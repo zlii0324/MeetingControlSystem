@@ -1,0 +1,7 @@
+**/.git
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/.DS_Store
+backend/instance/*.sqlite3

@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import config
@@ -24,11 +24,11 @@ class MeetingError(Exception):
 
 
 def utc_now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def isoformat(dt: datetime) -> str:
-    return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def parse_datetime(value: str | None, field_name: str) -> datetime | None:
@@ -42,8 +42,8 @@ def parse_datetime(value: str | None, field_name: str) -> datetime | None:
         raise MeetingError(f"{field_name} 时间格式无效，请使用 ISO 8601 格式") from exc
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def generate_room_id() -> str:
