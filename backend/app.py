@@ -29,7 +29,10 @@ def create_app() -> Flask:
     init_db()
 
     if config.enable_cors:
-        CORS(app, resources={r"/api/*": {"origins": config.frontend_origin}})
+        if config.frontend_origin:
+            CORS(app, resources={r"/api/*": {"origins": config.frontend_origin}})
+        else:
+            CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     @app.errorhandler(MeetingError)
     def handle_meeting_error(error: MeetingError):

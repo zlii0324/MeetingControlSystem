@@ -113,7 +113,10 @@ def jitsi_url(room_id: str) -> str:
 
 
 def access_url(room_id: str) -> str:
-    return f"{config.frontend_origin.rstrip('/')}/join/{room_id}"
+    base_url = (config.frontend_origin or "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}/join/{room_id}"
+    return f"/join/{room_id}"
 
 
 def meeting_url(room_id: str, password_required: bool = True) -> str:

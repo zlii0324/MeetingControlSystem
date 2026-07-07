@@ -24,7 +24,8 @@ https://meet.wusupower.com/
 
 ```bash
 cd backend
-source ../venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 python app.py
@@ -33,7 +34,7 @@ python app.py
 后端默认运行在：
 
 ```text
-http://localhost:5001
+http://0.0.0.0:5001
 ```
 
 ### 前端
@@ -42,11 +43,13 @@ http://localhost:5001
 cd frontend
 npm install
 cp .env.example .env
-npm run dev
+npm run build
+cd dist
+python3 -m http.server 3000
 ```
 
 前端默认运行在：
 
 ```text
-http://localhost:5173
+http://你的服务器IP:3000
 ```

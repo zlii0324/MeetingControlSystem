@@ -54,7 +54,7 @@ class Config:
     )
     jitsi_base_url: str = os.getenv("JITSI_BASE_URL", "https://meet.wusupower.com/")
     room_prefix: str = os.getenv("ROOM_PREFIX", "mcs")
-    frontend_origin: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    frontend_origin: str = os.getenv("FRONTEND_ORIGIN", "").strip()
     password_secret: str = os.getenv(
         "PASSWORD_SECRET",
         "development-secret-change-before-production",
