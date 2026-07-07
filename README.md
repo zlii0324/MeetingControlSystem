@@ -43,13 +43,11 @@ http://0.0.0.0:5001
 cd frontend
 npm install
 cp .env.example .env
-npm run build
-cd dist
-python3 -m http.server 3000
+npm run dev
 ```
 
-前端默认运行在：
+前端开发服务默认运行在：
 
 ```text
-http://你的服务器IP:3000
+http://127.0.0.1:5173
 ```

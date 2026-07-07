@@ -34,6 +34,7 @@ import {
   LockKeyhole,
   Plus,
   RefreshCw,
+  Repeat2,
   Trash2,
   Users,
   Video,
@@ -59,9 +60,16 @@ const statusMap = {
   Cancelled: { text: "已取消", color: "error", className: "status-cancelled" },
 };
 
+const recurrenceTypeOptions = [
+  { label: "每周", value: "weekly" },
+  { label: "每两周", value: "biweekly" },
+  { label: "每 N 天", value: "every_n_days" },
+  { label: "每月", value: "monthly" },
+];
+
 function toPayload(values) {
   const [start, end] = values.timeRange || [];
-  return {
+  const payload = {
     title: values.title,
     hostName: values.hostName,
     attendees: values.attendees || [],
@@ -71,6 +79,17 @@ function toPayload(values) {
     lobbyEnabled: Boolean(values.lobbyEnabled),
     passwordRequired: Boolean(values.passwordRequired),
   };
+
+  if (values.recurrenceEnabled) {
+    payload.recurrence = {
+      enabled: true,
+      type: values.recurrenceType,
+      interval: values.recurrenceInterval,
+      count: values.recurrenceCount,
+    };
+  }
+
+  return payload;
 }
 
 function toFormValues(meeting) {
@@ -102,11 +121,31 @@ function buildMeetingShareText(meeting, linkValue) {
     `会议：${meeting.title}`,
     `会议时间：${displayTime(meeting.startTime)} - ${displayTime(meeting.endTime)}`,
     `主持人：${meeting.hostName}`,
+    meeting.createdCount ? `周期会议：已生成 ${meeting.createdCount} 场` : null,
     `会议链接：${linkValue}`,
     meeting.password ? `会议密码：${meeting.password}` : null,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function recurrenceText(meeting) {
+  const recurrence = meeting?.recurrence;
+  if (!recurrence) return "非周期会议";
+
+  const count = recurrence.count ? `，共 ${recurrence.count} 场` : "";
+  const current =
+    Number.isInteger(recurrence.index) && recurrence.count
+      ? `，当前第 ${recurrence.index + 1} 场`
+      : "";
+
+  if (recurrence.type === "weekly") return `每周重复${count}${current}`;
+  if (recurrence.type === "biweekly") return `每两周重复${count}${current}`;
+  if (recurrence.type === "every_n_days") {
+    return `每 ${recurrence.interval || 1} 天重复${count}${current}`;
+  }
+  if (recurrence.type === "monthly") return `每月重复${count}${current}`;
+  return `周期会议${count}${current}`;
 }
 
 function startOfMondayWeek(value) {
@@ -143,12 +182,21 @@ function formatCalendarRange(value, view) {
 
 function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loading }) {
   const [form] = Form.useForm();
+  const recurrenceEnabled = Form.useWatch("recurrenceEnabled", form);
+  const recurrenceType = Form.useWatch("recurrenceType", form);
 
   useEffect(() => {
     if (!open) return;
+    form.resetFields();
 
     if (mode === "edit" && initialValues) {
-      form.setFieldsValue(toFormValues(initialValues));
+      form.setFieldsValue({
+        ...toFormValues(initialValues),
+        recurrenceEnabled: false,
+        recurrenceType: "weekly",
+        recurrenceInterval: 1,
+        recurrenceCount: 12,
+      });
       return;
     }
 
@@ -161,6 +209,10 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
       maxOccupants: 30,
       lobbyEnabled: false,
       passwordRequired: true,
+      recurrenceEnabled: false,
+      recurrenceType: "weekly",
+      recurrenceInterval: 1,
+      recurrenceCount: 12,
     });
   }, [form, initialValues, mode, open]);
 
@@ -215,6 +267,44 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
           />
         </Form.Item>
 
+        {mode === "create" && (
+          <div className="recurrence-section">
+            <Form.Item label="周期性会议" name="recurrenceEnabled" valuePropName="checked">
+              <Switch checkedChildren="是" unCheckedChildren="否" />
+            </Form.Item>
+
+            {recurrenceEnabled && (
+              <div className="recurrence-controls">
+                <Form.Item
+                  label="重复频率"
+                  name="recurrenceType"
+                  rules={[{ required: true, message: "请选择重复频率" }]}
+                >
+                  <Select options={recurrenceTypeOptions} />
+                </Form.Item>
+
+                {recurrenceType === "every_n_days" && (
+                  <Form.Item
+                    label="每隔天数"
+                    name="recurrenceInterval"
+                    rules={[{ required: true, message: "请输入间隔天数" }]}
+                  >
+                    <InputNumber min={1} max={365} className="full-width" addonAfter="天" />
+                  </Form.Item>
+                )}
+
+                <Form.Item
+                  label="生成场次"
+                  name="recurrenceCount"
+                  rules={[{ required: true, message: "请输入生成场次" }]}
+                >
+                  <InputNumber min={2} max={60} className="full-width" addonAfter="场" />
+                </Form.Item>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="form-grid">
           <Form.Item
             label="最大人数"
@@ -264,6 +354,13 @@ function CreationResultModal({ meeting, onClose, onCopy }) {
     >
       {meeting && (
         <div className="result-box">
+          {meeting.createdCount && (
+            <div className="series-result">
+              <Repeat2 size={18} />
+              <Text>已创建 {meeting.createdCount} 场周期会议，首场链接如下。</Text>
+            </div>
+          )}
+
           <div>
             <Text type="secondary">{protectedMeeting ? "入会验证链接" : "Jitsi 会议链接"}</Text>
             <div className="copy-line">
@@ -533,9 +630,12 @@ function ManagementApp() {
         messageApi.success("会议已更新");
       } else {
         const created = await createMeeting(payload);
-        setMeetings((items) => [created, ...items]);
+        const createdItems = created.seriesMeetings?.length
+          ? [created, ...created.seriesMeetings.filter((meeting) => meeting.id !== created.id)]
+          : [created];
+        setMeetings((items) => [...createdItems, ...items]);
         setCreatedMeeting(created);
-        messageApi.success("会议已创建");
+        messageApi.success(created.createdCount ? `已创建 ${created.createdCount} 场周期会议` : "会议已创建");
       }
       setFormOpen(false);
     } catch (error) {
@@ -545,12 +645,13 @@ function ManagementApp() {
     }
   };
 
-  const handleDelete = async (meeting) => {
+  const handleDelete = async (meeting, scope = "single") => {
     try {
-      const updated = await deleteMeeting(meeting.id);
-      setMeetings((items) => items.filter((item) => item.id !== updated.id));
+      const updated = await deleteMeeting(meeting.id, scope);
+      const deletedIds = updated.ids || [updated.id];
+      setMeetings((items) => items.filter((item) => !deletedIds.includes(item.id)));
       setSelectedMeeting(null);
-      messageApi.success("会议已删除");
+      messageApi.success(updated.deletedCount ? `已删除 ${updated.deletedCount} 场会议` : "会议已删除");
     } catch (error) {
       messageApi.error(error.message);
     }
@@ -618,7 +719,10 @@ function ManagementApp() {
                 }}
               >
                 <span className="chip-time">{dayjs(meeting.startTime).format("HH:mm")}</span>
-                <span className="chip-title">{meeting.title}</span>
+                <span className="chip-title">
+                  {meeting.isRecurring && <Repeat2 size={12} className="chip-repeat-icon" />}
+                  <span>{meeting.title}</span>
+                </span>
               </button>
             );
           })}
@@ -754,12 +858,12 @@ function ManagementApp() {
         width={520}
         extra={
           selectedMeetingFresh && (
-            <Space>
+            <Space wrap>
               <Button icon={<Edit3 size={16} />} onClick={() => openEdit(selectedMeetingFresh)}>
                 编辑
               </Button>
               <Popconfirm
-                title="删除会议"
+                title={selectedMeetingFresh.isRecurring ? "删除本场会议" : "删除会议"}
                 description="删除后会议会从日历和数据库中移除。"
                 okText="删除"
                 cancelText="取消"
@@ -767,9 +871,23 @@ function ManagementApp() {
                 onConfirm={() => handleDelete(selectedMeetingFresh)}
               >
                 <Button danger icon={<Trash2 size={16} />}>
-                  删除
+                  {selectedMeetingFresh.isRecurring ? "删除本场" : "删除"}
                 </Button>
               </Popconfirm>
+              {selectedMeetingFresh.isRecurring && (
+                <Popconfirm
+                  title="删除系列会议"
+                  description="此操作会删除同一周期系列下的所有会议。"
+                  okText="删除系列"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => handleDelete(selectedMeetingFresh, "series")}
+                >
+                  <Button danger icon={<Repeat2 size={16} />}>
+                    删除系列
+                  </Button>
+                </Popconfirm>
+              )}
             </Space>
           )
         }
@@ -784,6 +902,11 @@ function ManagementApp() {
                 <Tag color={statusMap[selectedMeetingFresh.status]?.color}>
                   {statusMap[selectedMeetingFresh.status]?.text}
                 </Tag>
+                {selectedMeetingFresh.isRecurring && (
+                  <Tag icon={<Repeat2 size={12} />} color="cyan">
+                    周期
+                  </Tag>
+                )}
               </Space>
               <Text type="secondary">{selectedMeetingFresh.roomId}</Text>
             </div>
@@ -813,6 +936,9 @@ function ManagementApp() {
               </Descriptions.Item>
               <Descriptions.Item label="会议时长">
                 {minutesBetween(selectedMeetingFresh.startTime, selectedMeetingFresh.endTime)}
+              </Descriptions.Item>
+              <Descriptions.Item label="周期规则">
+                {recurrenceText(selectedMeetingFresh)}
               </Descriptions.Item>
               <Descriptions.Item label="最大人数">
                 {selectedMeetingFresh.maxOccupants}

@@ -43,6 +43,11 @@ def _as_bool(name: str, default: bool) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _as_origin_list(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "")
+    return tuple(item.strip().rstrip("/") for item in value.split(",") if item.strip())
+
+
 load_dotenv()
 
 
@@ -54,7 +59,7 @@ class Config:
     )
     jitsi_base_url: str = os.getenv("JITSI_BASE_URL", "https://meet.wusupower.com/")
     room_prefix: str = os.getenv("ROOM_PREFIX", "mcs")
-    frontend_origin: str = os.getenv("FRONTEND_ORIGIN", "").strip()
+    frontend_origins: tuple[str, ...] = _as_origin_list("FRONTEND_ORIGIN")
     password_secret: str = os.getenv(
         "PASSWORD_SECRET",
         "development-secret-change-before-production",
@@ -68,6 +73,9 @@ class Config:
     def normalized_jitsi_base_url(self) -> str:
         return self.jitsi_base_url.rstrip("/") + "/"
 
+    @property
+    def frontend_origin(self) -> str:
+        return self.frontend_origins[0] if self.frontend_origins else ""
+
 
 config = Config()
-

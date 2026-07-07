@@ -39,6 +39,11 @@ def init_db() -> None:
                 max_occupants INTEGER NOT NULL DEFAULT 30,
                 lobby_enabled INTEGER NOT NULL DEFAULT 0,
                 meeting_url TEXT NOT NULL,
+                series_id TEXT,
+                recurrence_type TEXT,
+                recurrence_interval INTEGER,
+                recurrence_count INTEGER,
+                recurrence_index INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_started_at TEXT,
@@ -84,6 +89,18 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE meetings ADD COLUMN password_required INTEGER NOT NULL DEFAULT 1"
             )
+        recurrence_columns = {
+            "series_id": "TEXT",
+            "recurrence_type": "TEXT",
+            "recurrence_interval": "INTEGER",
+            "recurrence_count": "INTEGER",
+            "recurrence_index": "INTEGER",
+        }
+        for column_name, column_type in recurrence_columns.items():
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE meetings ADD COLUMN {column_name} {column_type}")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_series_id ON meetings(series_id)")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

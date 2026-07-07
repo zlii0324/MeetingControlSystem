@@ -263,11 +263,25 @@ textarea {
 
 .chip-title {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: 12px;
   font-weight: 600;
+}
+
+.chip-title > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip-repeat-icon {
+  flex: 0 0 auto;
 }
 
 .status-scheduled {
@@ -310,6 +324,28 @@ textarea {
   align-items: center;
 }
 
+.recurrence-section {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #e0e7ef;
+  border-radius: 8px;
+  background: #f8fbfb;
+}
+
+.recurrence-section .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.recurrence-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.recurrence-controls .ant-form-item:first-child {
+  grid-column: 1 / -1;
+}
+
 .modal-actions {
   margin-top: 6px;
 }
@@ -318,6 +354,17 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.series-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #cfe8e8;
+  border-radius: 8px;
+  background: #f0fbfb;
+  color: #0f6f71;
 }
 
 .copy-line,
@@ -445,6 +492,10 @@ textarea {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .recurrence-controls {
     grid-template-columns: 1fr;
   }
 

@@ -37,8 +37,9 @@ export function updateMeeting(id, values) {
   });
 }
 
-export function deleteMeeting(id) {
-  return request(`/api/meetings/${id}`, {
+export function deleteMeeting(id, scope = "single") {
+  const query = scope === "series" ? "?scope=series" : "";
+  return request(`/api/meetings/${id}${query}`, {
     method: "DELETE",
   });
 }

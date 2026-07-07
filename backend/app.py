@@ -29,8 +29,8 @@ def create_app() -> Flask:
     init_db()
 
     if config.enable_cors:
-        if config.frontend_origin:
-            CORS(app, resources={r"/api/*": {"origins": config.frontend_origin}})
+        if config.frontend_origins:
+            CORS(app, resources={r"/api/*": {"origins": list(config.frontend_origins)}})
         else:
             CORS(app, resources={r"/api/*": {"origins": "*"}})
 
@@ -75,7 +75,7 @@ def create_app() -> Flask:
 
     @app.delete("/api/meetings/<int:meeting_id>")
     def meetings_delete(meeting_id: int):
-        return jsonify(delete_meeting(meeting_id))
+        return jsonify(delete_meeting(meeting_id, request.args.get("scope")))
 
     @app.get("/api/access-logs")
     def access_logs_index():

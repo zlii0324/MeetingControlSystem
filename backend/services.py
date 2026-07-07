@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import uuid
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,6 +13,9 @@ from database import get_connection
 
 
 STATUSES = {"Scheduled", "Running", "Finished", "Cancelled"}
+RECURRENCE_TYPES = {"weekly", "biweekly", "every_n_days", "monthly"}
+MAX_RECURRENCE_COUNT = 1000
+MAX_RECURRENCE_INTERVAL_DAYS = 365
 
 
 class MeetingError(Exception):
@@ -75,6 +79,108 @@ def parse_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def parse_int(value: Any, field_name: str, default: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise MeetingError(f"{field_name} 必须是整数") from exc
+    return parsed
+
+
+def recurrence_value(payload: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    value = payload_value(payload, *keys, default=None)
+    if value is not None:
+        return value
+
+    recurrence = payload.get("recurrence")
+    if isinstance(recurrence, dict):
+        return payload_value(recurrence, *keys, default=default)
+    return default
+
+
+def parse_recurrence(payload: dict[str, Any]) -> dict[str, Any] | None:
+    recurrence_type_value = recurrence_value(payload, "recurrenceType", "recurrence_type", "type")
+    recurrence_enabled_value = recurrence_value(
+        payload,
+        "recurrenceEnabled",
+        "recurrence_enabled",
+        "isRecurring",
+        "is_recurring",
+        "enabled",
+    )
+    recurrence_enabled = parse_bool(
+        recurrence_enabled_value,
+        False,
+    )
+
+    if recurrence_enabled_value is not None and not recurrence_enabled:
+        return None
+    if not recurrence_enabled and not recurrence_type_value:
+        return None
+
+    recurrence_type = str(recurrence_type_value or "weekly").strip()
+    if recurrence_type not in RECURRENCE_TYPES:
+        raise MeetingError("周期类型无效")
+
+    count = parse_int(
+        recurrence_value(payload, "recurrenceCount", "recurrence_count", "count", default=12),
+        "生成次数",
+        12,
+    )
+    if count < 2:
+        raise MeetingError("周期性会议至少需要生成 2 次")
+    if count > MAX_RECURRENCE_COUNT:
+        raise MeetingError(f"周期性会议一次最多生成 {MAX_RECURRENCE_COUNT} 次")
+
+    if recurrence_type == "every_n_days":
+        interval = parse_int(
+            recurrence_value(payload, "recurrenceInterval", "recurrence_interval", "interval", default=1),
+            "周期间隔",
+            1,
+        )
+        if interval < 1 or interval > MAX_RECURRENCE_INTERVAL_DAYS:
+            raise MeetingError(f"每 N 天的间隔必须在 1 到 {MAX_RECURRENCE_INTERVAL_DAYS} 天之间")
+    elif recurrence_type == "biweekly":
+        interval = 2
+    else:
+        interval = 1
+
+    return {
+        "type": recurrence_type,
+        "interval": interval,
+        "count": count,
+    }
+
+
+def add_months(value: datetime, months: int) -> datetime:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+def recurrence_start_time(start_time: datetime, recurrence: dict[str, Any], index: int) -> datetime:
+    recurrence_type = recurrence["type"]
+    interval = recurrence["interval"]
+
+    if recurrence_type == "weekly":
+        return start_time + timedelta(weeks=index)
+    if recurrence_type == "biweekly":
+        return start_time + timedelta(weeks=index * 2)
+    if recurrence_type == "every_n_days":
+        return start_time + timedelta(days=index * interval)
+    if recurrence_type == "monthly":
+        return add_months(start_time, index)
+    raise MeetingError("周期类型无效")
+
+
+def recurrence_end_time(start_time: datetime, duration_seconds: int) -> datetime:
+    return start_time + timedelta(seconds=duration_seconds)
 
 
 def normalize_attendees(value: Any) -> list[str]:
@@ -154,7 +260,18 @@ def public_meeting(meeting: dict[str, Any], include_password: str | None = None)
         "finishedAt": meeting.get("finished_at"),
         "cancelledAt": meeting.get("cancelled_at"),
         "attendees": meeting.get("attendees", []),
+        "seriesId": meeting.get("series_id"),
+        "isRecurring": bool(meeting.get("series_id")),
+        "recurrence": None,
     }
+    if meeting.get("series_id"):
+        data["recurrence"] = {
+            "seriesId": meeting.get("series_id"),
+            "type": meeting.get("recurrence_type"),
+            "interval": meeting.get("recurrence_interval"),
+            "count": meeting.get("recurrence_count"),
+            "index": meeting.get("recurrence_index"),
+        }
     if include_password is not None:
         data["password"] = include_password
     return data
@@ -282,45 +399,74 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
     password_encrypted_value = encrypt_password(password, config.password_secret) if password else ""
     now = isoformat(utc_now())
     duration_seconds = int((end_time - start_time).total_seconds())
+    recurrence = parse_recurrence(payload)
+    occurrence_count = recurrence["count"] if recurrence else 1
+    series_id = uuid.uuid4().hex if recurrence else None
+    meeting_ids: list[int] = []
 
     with get_connection() as conn:
         try:
-            cursor = conn.execute(
-                """
-                INSERT INTO meetings (
-                    room_id, title, host_name, mail_owner, start_time, end_time,
-                    duration_seconds, status, password_required, password_hash, password_encrypted,
-                    max_occupants, lobby_enabled, meeting_url, created_at, updated_at
+            for index in range(occurrence_count):
+                occurrence_room_id = room_id if index == 0 else generate_room_id()
+                occurrence_start_time = (
+                    recurrence_start_time(start_time, recurrence, index) if recurrence else start_time
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    room_id,
-                    title,
-                    host_name,
-                    mail_owner,
-                    isoformat(start_time),
-                    isoformat(end_time),
-                    duration_seconds,
-                    1 if password_required else 0,
-                    password_hash_value,
-                    password_encrypted_value,
-                    max_occupants,
-                    1 if lobby_enabled else 0,
-                    jitsi_url(room_id),
-                    now,
-                    now,
-                ),
-            )
-            meeting_id = int(cursor.lastrowid)
-            _replace_attendees(conn, meeting_id, attendees)
+                occurrence_end_time = recurrence_end_time(occurrence_start_time, duration_seconds)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO meetings (
+                        room_id, title, host_name, mail_owner, start_time, end_time,
+                        duration_seconds, status, password_required, password_hash, password_encrypted,
+                        max_occupants, lobby_enabled, meeting_url, series_id, recurrence_type,
+                        recurrence_interval, recurrence_count, recurrence_index, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        occurrence_room_id,
+                        title,
+                        host_name,
+                        mail_owner,
+                        isoformat(occurrence_start_time),
+                        isoformat(occurrence_end_time),
+                        duration_seconds,
+                        1 if password_required else 0,
+                        password_hash_value,
+                        password_encrypted_value,
+                        max_occupants,
+                        1 if lobby_enabled else 0,
+                        jitsi_url(occurrence_room_id),
+                        series_id,
+                        recurrence["type"] if recurrence else None,
+                        recurrence["interval"] if recurrence else None,
+                        recurrence["count"] if recurrence else None,
+                        index if recurrence else None,
+                        now,
+                        now,
+                    ),
+                )
+                meeting_id = int(cursor.lastrowid)
+                meeting_ids.append(meeting_id)
+                _replace_attendees(conn, meeting_id, attendees)
         except sqlite3.IntegrityError as exc:
             raise MeetingError("Room ID 冲突，请重试") from exc
 
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        meeting = _attach_attendees(conn, dict(row))
+        placeholders = ",".join("?" for _ in meeting_ids)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM meetings
+             WHERE id IN ({placeholders})
+             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
+            """,
+            tuple(meeting_ids),
+        ).fetchall()
+        meetings = [_attach_attendees(conn, dict(row)) for row in rows]
 
-    return public_meeting(meeting, include_password=password)
+    response = public_meeting(meetings[0], include_password=password)
+    if recurrence:
+        response["createdCount"] = len(meetings)
+        response["seriesMeetings"] = [public_meeting(meeting) for meeting in meetings]
+    return response
 
 
 def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -425,11 +571,37 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     return public_meeting(meeting, include_password=new_password)
 
 
-def delete_meeting(meeting_id: int) -> dict[str, Any]:
+def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
+    normalized_scope = str(scope or "single").strip().lower()
+    if normalized_scope in {"", "meeting", "one"}:
+        normalized_scope = "single"
+    if normalized_scope not in {"single", "series"}:
+        raise MeetingError("删除范围无效")
+
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if row is None:
             raise MeetingError("会议不存在", 404)
+
+        if normalized_scope == "series" and row["series_id"]:
+            rows = conn.execute(
+                """
+                SELECT id
+                  FROM meetings
+                 WHERE series_id = ?
+                 ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
+                """,
+                (row["series_id"],),
+            ).fetchall()
+            meeting_ids = [item["id"] for item in rows]
+            conn.execute("DELETE FROM meetings WHERE series_id = ?", (row["series_id"],))
+            return {
+                "id": meeting_id,
+                "ids": meeting_ids,
+                "seriesId": row["series_id"],
+                "deleted": True,
+                "deletedCount": len(meeting_ids),
+            }
 
         conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
 
