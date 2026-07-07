@@ -1,0 +1,479 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  color: #1d1f23;
+  background: #f5f7f9;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+}
+
+.side-panel {
+  min-height: 100vh;
+  padding: 24px;
+  border-right: 1px solid #dde3ea;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.brand-block {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-block h3,
+.topbar h2,
+.drawer-title {
+  margin: 0;
+}
+
+.brand-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 8px;
+  background: #0f8b8d;
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.create-button {
+  height: 46px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.summary-grid > div {
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.summary-grid strong {
+  font-size: 26px;
+  line-height: 1;
+  color: #1f2937;
+}
+
+.summary-grid span {
+  margin-top: 8px;
+  color: #687385;
+}
+
+.side-section {
+  min-height: 0;
+}
+
+.side-section .ant-list {
+  margin-top: 8px;
+}
+
+.log-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.log-line > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.log-line .ant-typography {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.calendar-panel {
+  min-width: 0;
+  padding: 24px 28px 28px;
+}
+
+.topbar {
+  min-height: 62px;
+  margin-bottom: 18px;
+}
+
+.meeting-calendar {
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.calendar-toolbar {
+  min-height: 64px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e6ebf1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.calendar-range {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
+  font-size: 18px;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.calendar-weekday {
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-bottom: 1px solid #edf1f5;
+  color: #30343b;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.calendar-cell {
+  min-height: 132px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  border-right: 1px solid #edf1f5;
+  border-top: 1px solid #edf1f5;
+  background: #ffffff;
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.calendar-grid .calendar-cell:nth-child(7n + 7) {
+  border-right: 0;
+}
+
+.calendar-grid.is-week-view .calendar-cell {
+  min-height: min(52vh, 460px);
+}
+
+.calendar-cell.is-outside-month {
+  background: #fbfcfd;
+}
+
+.calendar-cell.is-outside-month .calendar-day {
+  color: #b8c0ca;
+}
+
+.calendar-cell.is-selected-day {
+  background: #e8f4f3;
+  box-shadow: inset 0 2px 0 #0f8b8d;
+}
+
+.calendar-cell.is-today .calendar-day {
+  border: 1px solid #0f8b8d;
+  color: #0f6f71;
+}
+
+.calendar-day {
+  min-width: 64px;
+  min-height: 30px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.calendar-cell.is-selected-day .calendar-day {
+  background: #0f8b8d;
+  border-color: #0f8b8d;
+  color: #ffffff;
+}
+
+.meeting-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.meeting-chip {
+  width: 100%;
+  height: 23px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 7px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.meeting-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.12);
+}
+
+.chip-time {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chip-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-scheduled {
+  background: #e9f6f6;
+  color: #0f6f71;
+}
+
+.status-running {
+  background: #e8f5ed;
+  color: #24714a;
+}
+
+.status-finished {
+  background: #eef0f3;
+  color: #697386;
+}
+
+.status-cancelled {
+  background: #fae8e6;
+  color: #a93630;
+  text-decoration: line-through;
+}
+
+.more-count {
+  height: 20px;
+  color: #687385;
+  font-size: 12px;
+  padding-left: 6px;
+}
+
+.full-width,
+.drawer-content {
+  width: 100%;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: center;
+}
+
+.modal-actions {
+  margin-top: 6px;
+}
+
+.result-box {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.copy-line,
+.link-box {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.link-box {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  margin-top: 0;
+  padding: 12px;
+  border: 1px solid #dfe6ed;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.copy-value,
+.link-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.link-copy-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.link-copy-content .ant-typography:first-child {
+  font-size: 12px;
+}
+
+.password-line .copy-value {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #9a3412;
+}
+
+.section-title {
+  margin-bottom: 10px;
+}
+
+.attendee-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.join-shell {
+  min-height: 100vh;
+  padding: 32px 18px;
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(180deg, rgba(15, 139, 141, 0.08), rgba(255, 255, 255, 0)),
+    #f5f7f9;
+}
+
+.join-panel {
+  width: min(100%, 460px);
+  padding: 28px;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(31, 41, 55, 0.12);
+}
+
+.join-icon {
+  width: 52px;
+  height: 52px;
+  margin-bottom: 18px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: #0f8b8d;
+}
+
+.join-content {
+  width: 100%;
+}
+
+.join-content h2 {
+  margin: 4px 0 0;
+  font-size: 26px;
+}
+
+.join-form {
+  width: 100%;
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .side-panel {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid #dde3ea;
+  }
+
+  .calendar-panel {
+    padding: 18px;
+  }
+}
+
+@media (max-width: 640px) {
+  .side-panel {
+    padding: 18px;
+  }
+
+  .topbar {
+    align-items: flex-start !important;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .calendar-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .calendar-range {
+    text-align: left;
+  }
+
+  .calendar-grid {
+    min-width: 760px;
+  }
+
+  .meeting-calendar {
+    overflow-x: auto;
+  }
+
+  .calendar-cell {
+    min-height: 112px;
+  }
+
+  .calendar-grid.is-week-view .calendar-cell {
+    min-height: 280px;
+  }
+
+  .meeting-chip {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+}
