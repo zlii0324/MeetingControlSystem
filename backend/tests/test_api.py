@@ -51,10 +51,12 @@ def test_create_meeting_returns_password_once(client):
     assert created["jitsiUrl"] is None
     assert re.fullmatch(r"\d{4}", created["password"])
     assert created["attendees"] == ["Alice", "Bob"]
+    assert "lobbyEnabled" not in created
 
     detail = client.get(f"/api/meetings/{created['id']}").get_json()
     assert "password" not in detail
     assert detail["attendees"] == ["Alice", "Bob"]
+    assert "lobbyEnabled" not in detail
 
 
 def test_reservation_allocates_existing_room(client):
@@ -78,6 +80,7 @@ def test_reservation_allocates_existing_room(client):
     assert payload["name"] == created["roomId"]
     assert re.fullmatch(r"\d{4}", payload["password"])
     assert payload["duration"] == 86400
+    assert "lobby" not in payload
 
 
 def test_deleted_meeting_is_removed_and_rejected_by_reservation(client):
@@ -93,6 +96,24 @@ def test_deleted_meeting_is_removed_and_rejected_by_reservation(client):
     response = client.post("/conference", data={"name": created["roomId"]})
     assert response.status_code == 403
     assert response.get_json()["message"] == "会议不存在"
+
+
+def test_meeting_status_is_derived_from_time_window(client):
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "进行中状态测试",
+            "hostName": "Alice",
+            "startTime": "2020-01-01T09:00:00Z",
+            "endTime": "2099-01-01T10:00:00Z",
+        },
+    ).get_json()
+
+    assert created["status"] == "Running"
+    detail = client.get(f"/api/meetings/{created['id']}").get_json()
+    assert detail["status"] == "Running"
+    running_items = client.get("/api/meetings?status=Running").get_json()["items"]
+    assert [item["id"] for item in running_items] == [created["id"]]
 
 
 def test_create_recurring_meeting_inserts_series(client):
@@ -125,7 +146,11 @@ def test_create_recurring_meeting_inserts_series(client):
 
     series = created["seriesMeetings"]
     assert len(series) == 4
+    assert len({meeting["id"] for meeting in series}) == 4
     assert {meeting["seriesId"] for meeting in series} == {created["seriesId"]}
+    assert {meeting["roomId"] for meeting in series} == {created["roomId"]}
+    assert {meeting["accessUrl"] for meeting in series} == {created["accessUrl"]}
+    assert {meeting["meetingUrl"] for meeting in series} == {created["meetingUrl"]}
     assert [meeting["recurrence"]["index"] for meeting in series] == [0, 1, 2, 3]
     assert [meeting["startTime"] for meeting in series] == [
         "2048-01-01T09:00:00.000Z",
@@ -138,6 +163,38 @@ def test_create_recurring_meeting_inserts_series(client):
     listed = client.get("/api/meetings").get_json()["items"]
     assert len(listed) == 4
     assert {meeting["seriesId"] for meeting in listed} == {created["seriesId"]}
+
+
+def test_shared_recurring_url_resolves_to_next_available_occurrence(client):
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "同链接系列",
+            "hostName": "Nina",
+            "passwordRequired": False,
+            "startTime": "2048-03-01T09:00:00Z",
+            "endTime": "2048-03-01T10:00:00Z",
+            "recurrence": {
+                "enabled": True,
+                "type": "weekly",
+                "count": 2,
+            },
+        },
+    ).get_json()
+    room_id = created["roomId"]
+    first, second = created["seriesMeetings"]
+
+    detail = client.get(f"/api/public/meetings/{room_id}").get_json()
+    assert detail["roomId"] == room_id
+    assert detail["startTime"] == first["startTime"]
+    assert detail["jitsiUrl"] == created["meetingUrl"]
+
+    delete_response = client.delete(f"/api/meetings/{first['id']}")
+    assert delete_response.status_code == 200
+
+    detail = client.get(f"/api/public/meetings/{room_id}").get_json()
+    assert detail["roomId"] == room_id
+    assert detail["startTime"] == second["startTime"]
 
 
 def test_delete_recurring_series_removes_all_meetings(client):
@@ -211,9 +268,92 @@ def test_init_db_migrates_existing_meetings_table(tmp_path, monkeypatch):
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(meetings)").fetchall()}
+        unique_room_id_indexes = []
+        for row in conn.execute("PRAGMA index_list(meetings)").fetchall():
+            if not row[2]:
+                continue
+            index_name = row[1]
+            quoted_index_name = '"' + index_name.replace('"', '""') + '"'
+            index_columns = [
+                item[2]
+                for item in conn.execute(f"PRAGMA index_info({quoted_index_name})").fetchall()
+            ]
+            if index_columns == ["room_id"]:
+                unique_room_id_indexes.append(index_name)
 
     assert {"series_id", "recurrence_type", "recurrence_interval", "recurrence_count", "recurrence_index"} <= columns
     assert "idx_meetings_series_id" in indexes
+    assert unique_room_id_indexes == []
+
+
+def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy-recurrence.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE meetings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                host_name TEXT NOT NULL,
+                mail_owner TEXT,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('Scheduled', 'Running', 'Finished', 'Cancelled')
+                ),
+                password_required INTEGER NOT NULL DEFAULT 1,
+                password_hash TEXT NOT NULL,
+                password_encrypted TEXT NOT NULL,
+                max_occupants INTEGER NOT NULL DEFAULT 30,
+                lobby_enabled INTEGER NOT NULL DEFAULT 0,
+                meeting_url TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_started_at TEXT,
+                finished_at TEXT,
+                cancelled_at TEXT,
+                recurrence_type TEXT,
+                recurrence_interval INTEGER NOT NULL DEFAULT 1,
+                recurrence_end TEXT,
+                series_id TEXT,
+                recurrence_count INTEGER,
+                recurrence_index INTEGER
+            );
+            """
+        )
+
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
+    monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    for module_name in ["config", "database", "services", "app"]:
+        sys.modules.pop(module_name, None)
+
+    from app import create_app
+
+    app = create_app()
+    app.config.update(TESTING=True)
+    with app.test_client() as test_client:
+        response = test_client.post("/api/meetings", json={"title": "旧库兼容", "hostName": "Alice"})
+        recurring_response = test_client.post(
+            "/api/meetings",
+            json={
+                "title": "旧库同链接系列",
+                "hostName": "Alice",
+                "startTime": "2048-04-01T09:00:00Z",
+                "endTime": "2048-04-01T10:00:00Z",
+                "recurrence": {"enabled": True, "type": "weekly", "count": 2},
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.get_json()["title"] == "旧库兼容"
+    assert recurring_response.status_code == 201
+    recurring_payload = recurring_response.get_json()
+    assert {meeting["roomId"] for meeting in recurring_payload["seriesMeetings"]} == {
+        recurring_payload["roomId"]
+    }
 
 
 def test_cors_allows_multiple_frontend_origins(tmp_path, monkeypatch):

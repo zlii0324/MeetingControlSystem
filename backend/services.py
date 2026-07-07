@@ -235,6 +235,20 @@ def is_password_required(meeting: dict[str, Any]) -> bool:
     return bool(meeting.get("password_required", 1))
 
 
+def effective_status(meeting: dict[str, Any]) -> str:
+    if meeting["status"] in {"Cancelled", "Finished"}:
+        return meeting["status"]
+
+    start_time = parse_datetime(meeting["start_time"], "startTime")
+    end_time = parse_datetime(meeting["end_time"], "endTime")
+    now = utc_now()
+    if end_time and now > end_time:
+        return "Finished"
+    if start_time and end_time and start_time <= now <= end_time:
+        return "Running"
+    return "Scheduled"
+
+
 def public_meeting(meeting: dict[str, Any], include_password: str | None = None) -> dict[str, Any]:
     password_required = is_password_required(meeting)
     room_id = meeting["room_id"]
@@ -247,9 +261,8 @@ def public_meeting(meeting: dict[str, Any], include_password: str | None = None)
         "startTime": meeting["start_time"],
         "endTime": meeting["end_time"],
         "durationSeconds": meeting["duration_seconds"],
-        "status": meeting["status"],
+        "status": effective_status(meeting),
         "maxOccupants": meeting["max_occupants"],
-        "lobbyEnabled": bool(meeting["lobby_enabled"]),
         "passwordRequired": password_required,
         "accessUrl": access_url(room_id),
         "jitsiUrl": None if password_required else meeting["meeting_url"],
@@ -326,31 +339,55 @@ def _refresh_expired_status(conn: sqlite3.Connection, meeting: dict[str, Any]) -
     return meeting
 
 
+def _select_meeting_for_room(meetings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not meetings:
+        return None
+
+    now = utc_now()
+    earliest_datetime = datetime.min.replace(tzinfo=timezone.utc)
+    joinable: list[tuple[datetime, int, dict[str, Any]]] = []
+    upcoming: list[tuple[datetime, int, dict[str, Any]]] = []
+    fallback: list[tuple[datetime, int, dict[str, Any]]] = []
+
+    for meeting in meetings:
+        start_time = parse_datetime(meeting["start_time"], "startTime") or earliest_datetime
+        end_time = parse_datetime(meeting["end_time"], "endTime") or start_time
+        fallback.append((start_time, int(meeting["id"]), meeting))
+
+        if meeting["status"] in {"Cancelled", "Finished"}:
+            continue
+
+        earliest_join_time = start_time - timedelta(minutes=config.early_join_minutes)
+        if earliest_join_time <= now <= end_time:
+            joinable.append((start_time, int(meeting["id"]), meeting))
+        elif start_time > now:
+            upcoming.append((start_time, int(meeting["id"]), meeting))
+
+    if joinable:
+        return sorted(joinable, key=lambda item: (item[0], item[1]))[0][2]
+    if upcoming:
+        return sorted(upcoming, key=lambda item: (item[0], item[1]))[0][2]
+    return sorted(fallback, key=lambda item: (item[0], item[1]), reverse=True)[0][2]
+
+
 def list_meetings(status: str | None = None) -> list[dict[str, Any]]:
     with get_connection() as conn:
         if status and status not in STATUSES:
             raise MeetingError("会议状态参数无效")
 
-        if status:
-            rows = conn.execute(
-                """
-                SELECT * FROM meetings
-                 WHERE status = ?
-                 ORDER BY start_time DESC, id DESC
-                """,
-                (status,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT * FROM meetings
-                 ORDER BY start_time DESC, id DESC
-                """
-            ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT * FROM meetings
+             ORDER BY start_time DESC, id DESC
+            """
+        ).fetchall()
 
         meetings = [_attach_attendees(conn, _refresh_expired_status(conn, dict(row))) for row in rows]
         conn.commit()
-    return [public_meeting(meeting) for meeting in meetings]
+    public_meetings = [public_meeting(meeting) for meeting in meetings]
+    if status:
+        return [meeting for meeting in public_meetings if meeting["status"] == status]
+    return public_meetings
 
 
 def get_meeting(meeting_id: int) -> dict[str, Any]:
@@ -391,7 +428,6 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
         raise MeetingError("最大参会人数必须在 1 到 500 之间")
 
     attendees = normalize_attendees(payload.get("attendees"))
-    lobby_enabled = parse_bool(payload_value(payload, "lobbyEnabled", "lobby_enabled"), False)
     password_required = parse_bool(payload_value(payload, "passwordRequired", "password_required"), True)
     room_id = generate_room_id()
     password = generate_password() if password_required else None
@@ -406,8 +442,11 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
 
     with get_connection() as conn:
         try:
+            while conn.execute("SELECT 1 FROM meetings WHERE room_id = ? LIMIT 1", (room_id,)).fetchone():
+                room_id = generate_room_id()
+
             for index in range(occurrence_count):
-                occurrence_room_id = room_id if index == 0 else generate_room_id()
+                occurrence_room_id = room_id
                 occurrence_start_time = (
                     recurrence_start_time(start_time, recurrence, index) if recurrence else start_time
                 )
@@ -434,11 +473,11 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
                         password_hash_value,
                         password_encrypted_value,
                         max_occupants,
-                        1 if lobby_enabled else 0,
+                        0,
                         jitsi_url(occurrence_room_id),
                         series_id,
                         recurrence["type"] if recurrence else None,
-                        recurrence["interval"] if recurrence else None,
+                        recurrence["interval"] if recurrence else 1,
                         recurrence["count"] if recurrence else None,
                         index if recurrence else None,
                         now,
@@ -502,10 +541,6 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
 
         attendees_present = "attendees" in payload
         attendees = normalize_attendees(payload.get("attendees")) if attendees_present else []
-        lobby_enabled = parse_bool(
-            payload_value(payload, "lobbyEnabled", "lobby_enabled", default=bool(meeting["lobby_enabled"])),
-            bool(meeting["lobby_enabled"]),
-        )
         password_required = is_password_required(meeting)
         new_password: str | None = None
         password_hash_value = meeting["password_hash"]
@@ -542,7 +577,6 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                    password_hash = ?,
                    password_encrypted = ?,
                    max_occupants = ?,
-                   lobby_enabled = ?,
                    updated_at = ?
              WHERE id = ?
             """,
@@ -557,7 +591,6 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                 password_hash_value,
                 password_encrypted_value,
                 max_occupants,
-                1 if lobby_enabled else 0,
                 now,
                 meeting_id,
             ),
@@ -610,11 +643,19 @@ def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
 
 def get_meeting_by_room(room_id: str) -> dict[str, Any] | None:
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE room_id = ?", (room_id,)).fetchone()
-        if row is None:
+        rows = conn.execute(
+            """
+            SELECT * FROM meetings
+             WHERE room_id = ?
+             ORDER BY start_time ASC, COALESCE(recurrence_index, 0) ASC, id ASC
+            """,
+            (room_id,),
+        ).fetchall()
+        if not rows:
             return None
 
-        meeting = _refresh_expired_status(conn, dict(row))
+        meetings = [_refresh_expired_status(conn, dict(row)) for row in rows]
+        meeting = _select_meeting_for_room(meetings)
         conn.commit()
         return meeting
 
@@ -641,8 +682,6 @@ def reservation_payload(meeting: dict[str, Any]) -> dict[str, Any]:
     }
     if is_password_required(meeting) and meeting["password_encrypted"]:
         payload["password"] = decrypt_password(meeting["password_encrypted"], config.password_secret)
-    if meeting["lobby_enabled"]:
-        payload["lobby"] = True
     return payload
 
 
@@ -658,7 +697,7 @@ def public_join_meeting(room_id: str) -> dict[str, Any]:
         "hostName": meeting["host_name"],
         "startTime": meeting["start_time"],
         "endTime": meeting["end_time"],
-        "status": meeting["status"],
+        "status": effective_status(meeting),
         "passwordRequired": password_required,
     }
     if not password_required:

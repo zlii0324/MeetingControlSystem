@@ -76,7 +76,6 @@ function toPayload(values) {
     startTime: start?.toISOString(),
     endTime: end?.toISOString(),
     maxOccupants: values.maxOccupants,
-    lobbyEnabled: Boolean(values.lobbyEnabled),
     passwordRequired: Boolean(values.passwordRequired),
   };
 
@@ -99,7 +98,6 @@ function toFormValues(meeting) {
     attendees: meeting.attendees || [],
     timeRange: [dayjs(meeting.startTime), dayjs(meeting.endTime)],
     maxOccupants: meeting.maxOccupants,
-    lobbyEnabled: meeting.lobbyEnabled,
     passwordRequired: meeting.passwordRequired,
   };
 }
@@ -207,7 +205,6 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
       attendees: [],
       timeRange: [start, start.add(1, "hour")],
       maxOccupants: 30,
-      lobbyEnabled: false,
       passwordRequired: true,
       recurrenceEnabled: false,
       recurrenceType: "weekly",
@@ -312,10 +309,6 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
             rules={[{ required: true, message: "请输入最大人数" }]}
           >
             <InputNumber min={1} max={500} className="full-width" />
-          </Form.Item>
-
-          <Form.Item label="启用等候室" name="lobbyEnabled" valuePropName="checked">
-            <Switch />
           </Form.Item>
 
           <Form.Item label="创建密码" name="passwordRequired" valuePropName="checked">
@@ -549,8 +542,10 @@ function ManagementApp() {
   const [calendarView, setCalendarView] = useState("week");
   const [messageApi, contextHolder] = message.useMessage();
 
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async ({ silent = false } = {}) => {
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const [meetingData, logData] = await Promise.all([fetchMeetings(), fetchAccessLogs()]);
       setMeetings(meetingData.items || []);
@@ -558,12 +553,18 @@ function ManagementApp() {
     } catch (error) {
       messageApi.error(error.message);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     loadData();
+    const timer = window.setInterval(() => {
+      loadData({ silent: true });
+    }, 30000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const meetingsByDate = useMemo(() => {
@@ -811,11 +812,6 @@ function ManagementApp() {
             <Title level={2}>会议日历</Title>
             <Text type="secondary">点击会议实体查看链接、参会者和编辑入口</Text>
           </div>
-          <Space wrap>
-            <Tag color="processing">已预约</Tag>
-            <Tag color="success">进行中</Tag>
-            <Tag>已结束</Tag>
-          </Space>
         </Flex>
 
         <Spin spinning={loading}>
@@ -942,9 +938,6 @@ function ManagementApp() {
               </Descriptions.Item>
               <Descriptions.Item label="最大人数">
                 {selectedMeetingFresh.maxOccupants}
-              </Descriptions.Item>
-              <Descriptions.Item label="等候室">
-                {selectedMeetingFresh.lobbyEnabled ? "已启用" : "未启用"}
               </Descriptions.Item>
               <Descriptions.Item label="会议密码">
                 {selectedMeetingFresh.passwordRequired ? "已启用" : "未启用"}
