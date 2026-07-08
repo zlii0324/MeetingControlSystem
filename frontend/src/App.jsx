@@ -799,7 +799,7 @@ function ManagementApp() {
           </div>
           <div>
             <Title level={3}>会议管理系统</Title>
-            <Text type="secondary">Jitsi Reservation Console</Text>
+            <Text type="secondary">Wusupower meeting console</Text>
           </div>
         </div>
 
