@@ -20,6 +20,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.setenv("JITSI_BASE_URL", "https://meet.wusupower.com/")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
 
     for module_name in ["config", "database", "services", "app"]:
         sys.modules.pop(module_name, None)
@@ -351,6 +352,7 @@ def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, m
     monkeypatch.setenv("DATABASE_PATH", str(db_path))
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
     for module_name in ["config", "database", "services", "app"]:
         sys.modules.pop(module_name, None)
 
@@ -378,6 +380,28 @@ def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, m
     assert {meeting["roomId"] for meeting in recurring_payload["seriesMeetings"]} == {
         recurring_payload["roomId"]
     }
+
+
+def test_access_url_uses_bookmeeting_origin_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "meetings.sqlite3"))
+    monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
+    monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
+    monkeypatch.delenv("MEETING_LINK_ORIGIN", raising=False)
+
+    for module_name in ["config", "database", "services", "app"]:
+        sys.modules.pop(module_name, None)
+
+    from app import create_app
+
+    app = create_app()
+    app.config.update(TESTING=True)
+    with app.test_client() as test_client:
+        response = test_client.post("/api/meetings", json={"title": "默认域名", "hostName": "Alice"})
+
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["accessUrl"].startswith("http://bookmeeting.wusupower.com/join/")
+    assert created["meetingUrl"] == created["accessUrl"]
 
 
 def test_cors_allows_multiple_frontend_origins(tmp_path, monkeypatch):

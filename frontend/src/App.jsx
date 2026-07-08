@@ -52,6 +52,7 @@ import {
 const { Text, Title } = Typography;
 const { RangePicker } = DatePicker;
 const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
+const joinLinkOrigin = import.meta.env.VITE_JOIN_LINK_ORIGIN || "http://bookmeeting.wusupower.com";
 
 const statusMap = {
   Scheduled: { text: "已预约", color: "processing", className: "status-scheduled" },
@@ -125,6 +126,57 @@ function buildMeetingShareText(meeting, linkValue) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function absoluteUrl(value) {
+  if (!value) return "";
+  try {
+    return new URL(String(value), joinLinkOrigin).toString();
+  } catch {
+    return String(value);
+  }
+}
+
+function fallbackCopyText(value) {
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+
+  textarea.focus({ preventScroll: true });
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("copy command failed");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+async function writeClipboardText(text) {
+  const value = String(text ?? "").trim();
+  if (!value) {
+    throw new Error("nothing to copy");
+  }
+
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall through to the selection-based copy path for restricted browsers.
+    }
+  }
+
+  fallbackCopyText(value);
 }
 
 function recurrenceText(meeting) {
@@ -329,7 +381,10 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
 
 function CreationResultModal({ meeting, onClose, onCopy }) {
   const protectedMeeting = Boolean(meeting?.passwordRequired);
-  const linkValue = protectedMeeting ? meeting?.accessUrl || meeting?.meetingUrl : meeting?.jitsiUrl || meeting?.meetingUrl;
+  const rawLinkValue = protectedMeeting
+    ? meeting?.accessUrl || meeting?.meetingUrl
+    : meeting?.jitsiUrl || meeting?.meetingUrl;
+  const linkValue = absoluteUrl(rawLinkValue);
   const shareText = meeting ? buildMeetingShareText(meeting, linkValue) : "";
 
   return (
@@ -660,7 +715,7 @@ function ManagementApp() {
 
   const copyText = async (text) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       messageApi.success("已复制");
     } catch {
       messageApi.error("复制失败");
@@ -670,9 +725,10 @@ function ManagementApp() {
   const goToday = () => setCalendarValue(dayjs());
   const goPrevious = () => setCalendarValue((value) => value.subtract(1, calendarView));
   const goNext = () => setCalendarValue((value) => value.add(1, calendarView));
-  const selectedMeetingLink = selectedMeetingFresh?.passwordRequired
+  const selectedMeetingRawLink = selectedMeetingFresh?.passwordRequired
     ? selectedMeetingFresh.accessUrl || selectedMeetingFresh.meetingUrl
     : selectedMeetingFresh?.jitsiUrl || selectedMeetingFresh?.meetingUrl;
+  const selectedMeetingLink = absoluteUrl(selectedMeetingRawLink);
   const selectedMeetingLinkLabel = selectedMeetingFresh?.passwordRequired ? "入会验证链接" : "Jitsi 会议链接";
 
   const renderCalendarCell = (current) => {
