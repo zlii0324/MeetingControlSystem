@@ -165,7 +165,7 @@ textarea {
 }
 
 .calendar-cell {
-  min-height: 132px;
+  height: 132px;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -186,7 +186,7 @@ textarea {
 }
 
 .calendar-grid.is-week-view .calendar-cell {
-  min-height: min(52vh, 460px);
+  height: min(52vh, 460px);
 }
 
 .calendar-cell.is-outside-month {
@@ -228,10 +228,29 @@ textarea {
 }
 
 .meeting-stack {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: #8fbfc0 transparent;
+}
+
+.meeting-stack::-webkit-scrollbar {
+  width: 6px;
+}
+
+.meeting-stack::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #8fbfc0;
+}
+
+.meeting-stack::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .meeting-chip {
@@ -303,13 +322,6 @@ textarea {
   background: #fae8e6;
   color: #a93630;
   text-decoration: line-through;
-}
-
-.more-count {
-  height: 20px;
-  color: #687385;
-  font-size: 12px;
-  padding-left: 6px;
 }
 
 .full-width,
@@ -517,11 +529,11 @@ textarea {
   }
 
   .calendar-cell {
-    min-height: 112px;
+    height: 112px;
   }
 
   .calendar-grid.is-week-view .calendar-cell {
-    min-height: 280px;
+    height: 280px;
   }
 
   .meeting-chip {

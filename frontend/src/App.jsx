@@ -763,7 +763,7 @@ function ManagementApp() {
           <span>{current.format("M月D日")}</span>
         </div>
         <div className="meeting-stack">
-          {dayMeetings.slice(0, 4).map((meeting) => {
+          {dayMeetings.map((meeting) => {
             const status = statusMap[meeting.status] || statusMap.Scheduled;
             return (
               <button
@@ -783,7 +783,6 @@ function ManagementApp() {
               </button>
             );
           })}
-          {dayMeetings.length > 4 && <span className="more-count">+{dayMeetings.length - 4}</span>}
         </div>
       </div>
     );
