@@ -237,6 +237,60 @@ def _init_db_locked() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_meeting_attendees_meeting_id
                 ON meeting_attendees(meeting_id);
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'scheduler')),
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'active', 'rejected', 'disabled')
+                ),
+                register_message TEXT,
+                approved_by INTEGER,
+                approved_at TEXT,
+                rejected_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_login_at TEXT,
+                FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                created_ip TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS password_reset_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+                requested_at TEXT NOT NULL,
+                reviewed_by INTEGER,
+                reviewed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+            CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_password_reset_requests_status
+                ON password_reset_requests(status);
+            CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user_id
+                ON password_reset_requests(user_id);
             """
         )
 

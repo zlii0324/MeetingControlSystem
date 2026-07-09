@@ -49,6 +49,13 @@ def _as_origin_list(name: str) -> tuple[str, ...]:
     return tuple(item.strip().rstrip("/") for item in value.split(",") if item.strip())
 
 
+def _as_cookie_samesite(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip()
+    if value not in {"Lax", "Strict", "None"}:
+        raise ValueError(f"{name} must be one of Lax, Strict, None")
+    return value
+
+
 load_dotenv()
 
 
@@ -73,6 +80,10 @@ class Config:
     early_join_minutes: int = _as_int("RESERVATION_EARLY_JOIN_MINUTES", 15)
     max_default_occupants: int = _as_int("DEFAULT_MAX_OCCUPANTS", 30)
     enable_cors: bool = _as_bool("ENABLE_CORS", True)
+    session_cookie_name: str = os.getenv("SESSION_COOKIE_NAME", "mcs_session")
+    session_ttl_days: int = _as_int("SESSION_TTL_DAYS", 7)
+    session_cookie_secure: bool = _as_bool("SESSION_COOKIE_SECURE", False)
+    session_cookie_samesite: str = _as_cookie_samesite("SESSION_COOKIE_SAMESITE", "Lax")
 
     @property
     def normalized_jitsi_base_url(self) -> str:

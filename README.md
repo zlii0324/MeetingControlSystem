@@ -8,6 +8,8 @@
 - 一次性会议密码生成与保存
 - 会议创建、查看、编辑、删除/取消
 - 参会者名单管理
+- 管理端账号登录、用户注册申请与管理员审核
+- 管理员用户管理、密码找回申请与临时密码重置
 - 预留 Jitsi Reservation `/conference` 接口，当前阶段不用配置 Prosody
 
 当前 Jitsi 会议地址默认使用：
@@ -28,6 +30,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+python manage.py create-admin
+# 建议至少创建两个不同管理员账号，避免单人遗失密码导致无人可登录。
 python app.py
 ```
 

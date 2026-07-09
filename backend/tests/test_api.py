@@ -13,17 +13,43 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
+APP_MODULES = ["config", "database", "auth", "services", "app"]
+ADMIN_PASSWORD = "AdminPass123!"
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
+
+def reset_app_modules() -> None:
+    for module_name in APP_MODULES:
+        sys.modules.pop(module_name, None)
+
+
+def configure_test_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "meetings.sqlite3"))
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.setenv("JITSI_BASE_URL", "https://meet.wusupower.com/")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
     monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
 
-    for module_name in ["config", "database", "services", "app"]:
-        sys.modules.pop(module_name, None)
+
+def create_logged_in_admin(test_client) -> None:
+    from auth import create_admin_user
+
+    create_admin_user(
+        username="admin",
+        display_name="Admin",
+        email="admin@example.com",
+        password=ADMIN_PASSWORD,
+    )
+    response = test_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200
+
+
+@pytest.fixture()
+def anonymous_client(tmp_path, monkeypatch):
+    configure_test_env(tmp_path, monkeypatch)
+    reset_app_modules()
 
     from app import create_app
 
@@ -33,6 +59,242 @@ def client(tmp_path, monkeypatch):
         yield client
 
     os.environ.pop("DATABASE_PATH", None)
+
+
+@pytest.fixture()
+def client(anonymous_client):
+    create_logged_in_admin(anonymous_client)
+    yield anonymous_client
+
+
+def test_management_api_requires_login(anonymous_client):
+    response = anonymous_client.get("/api/meetings")
+
+    assert response.status_code == 401
+    assert response.get_json()["message"] == "请先登录"
+
+
+def test_registration_requires_admin_approval(anonymous_client):
+    register_response = anonymous_client.post(
+        "/api/auth/register",
+        json={
+            "username": "nina",
+            "displayName": "Nina",
+            "email": "nina@example.com",
+            "password": "NinaPass123",
+            "registerMessage": "我是行政部 Nina，需要预约会议。",
+        },
+    )
+
+    assert register_response.status_code == 201
+    registered = register_response.get_json()["user"]
+    assert registered["status"] == "pending"
+    assert registered["registerMessage"] == "我是行政部 Nina，需要预约会议。"
+
+    pending_login = anonymous_client.post(
+        "/api/auth/login",
+        json={"username": "nina", "password": "NinaPass123"},
+    )
+    assert pending_login.status_code == 403
+    assert pending_login.get_json()["message"] == "账号待管理员审核"
+
+    create_logged_in_admin(anonymous_client)
+    pending_users = anonymous_client.get("/api/admin/users?status=pending").get_json()["items"]
+    assert [user["username"] for user in pending_users] == ["nina"]
+
+    approve_response = anonymous_client.post(f"/api/admin/users/{registered['id']}/approve")
+    assert approve_response.status_code == 200
+    assert approve_response.get_json()["user"]["status"] == "active"
+
+    login_response = anonymous_client.post(
+        "/api/auth/login",
+        json={"username": "nina", "password": "NinaPass123"},
+    )
+    assert login_response.status_code == 200
+    assert login_response.get_json()["user"]["role"] == "scheduler"
+
+
+def test_registration_requires_unique_email(anonymous_client):
+    missing_email = anonymous_client.post(
+        "/api/auth/register",
+        json={
+            "username": "noemail",
+            "displayName": "No Email",
+            "password": "NoEmailPass123",
+            "registerMessage": "我需要申请会议管理权限。",
+        },
+    )
+    assert missing_email.status_code == 400
+    assert missing_email.get_json()["message"] == "邮箱不能为空"
+
+    first = anonymous_client.post(
+        "/api/auth/register",
+        json={
+            "username": "eva",
+            "displayName": "Eva",
+            "email": "shared@example.com",
+            "password": "EvaPass123",
+            "registerMessage": "我是 Eva，需要预约会议。",
+        },
+    )
+    assert first.status_code == 201
+
+    duplicate = anonymous_client.post(
+        "/api/auth/register",
+        json={
+            "username": "evan",
+            "displayName": "Evan",
+            "email": "shared@example.com",
+            "password": "EvanPass123",
+            "registerMessage": "我是 Evan，需要预约会议。",
+        },
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.get_json()["message"] == "邮箱已被使用"
+
+
+def test_user_password_is_stored_as_hash(anonymous_client):
+    password = "LisaPass123"
+    response = anonymous_client.post(
+        "/api/auth/register",
+        json={
+            "username": "lisa",
+            "displayName": "Lisa",
+            "email": "lisa@example.com",
+            "password": password,
+            "registerMessage": "我是财务部 Lisa，需要预约会议权限。",
+        },
+    )
+
+    assert response.status_code == 201
+
+    from database import get_connection
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE username = 'lisa'").fetchone()
+
+    assert row["password_hash"] != password
+    assert row["password_hash"].startswith("pbkdf2_sha256$")
+
+
+def test_admin_can_manage_users_and_reset_password(client):
+    create_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "mike",
+            "displayName": "Mike",
+            "email": "mike@example.com",
+            "password": "MikePass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+
+    assert create_response.status_code == 201
+    created = create_response.get_json()["user"]
+
+    update_response = client.patch(
+        f"/api/admin/users/{created['id']}",
+        json={"displayName": "Mike Chen", "role": "scheduler", "status": "active"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.get_json()["user"]["displayName"] == "Mike Chen"
+
+    reset_response = client.post(f"/api/admin/users/{created['id']}/reset-password")
+    assert reset_response.status_code == 200
+    temporary_password = reset_response.get_json()["temporaryPassword"]
+    assert temporary_password.startswith("Mcs-")
+
+    client.post("/api/auth/logout")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "mike", "password": temporary_password},
+    )
+    assert login_response.status_code == 200
+
+    admin_login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert admin_login.status_code == 200
+    delete_response = client.delete(f"/api/admin/users/{created['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.get_json() == {"deleted": True, "id": created["id"]}
+
+
+def test_last_active_admin_cannot_be_removed(client):
+    self_delete = client.delete("/api/admin/users/1")
+    assert self_delete.status_code == 409
+
+    demote_response = client.patch("/api/admin/users/1", json={"role": "scheduler"})
+    assert demote_response.status_code == 409
+    assert demote_response.get_json()["message"] == "至少需要保留一个可用管理员账号"
+
+    disable_response = client.patch("/api/admin/users/1", json={"status": "disabled"})
+    assert disable_response.status_code == 409
+    assert disable_response.get_json()["message"] == "至少需要保留一个可用管理员账号"
+
+
+def test_password_reset_request_requires_admin_approval(client):
+    create_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "nora",
+            "displayName": "Nora",
+            "email": "nora@example.com",
+            "password": "NoraPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    user = create_response.get_json()["user"]
+
+    request_response = client.post(
+        "/api/auth/password-reset-requests",
+        json={"account": "nora", "message": "我忘记密码了，请帮忙重置。"},
+    )
+    assert request_response.status_code == 201
+    reset_request = request_response.get_json()["request"]
+    assert reset_request["status"] == "pending"
+    assert reset_request["userId"] == user["id"]
+
+    pending_items = client.get("/api/admin/password-reset-requests?status=pending").get_json()["items"]
+    assert [item["username"] for item in pending_items] == ["nora"]
+
+    approve_response = client.post(f"/api/admin/password-reset-requests/{reset_request['id']}/approve")
+    assert approve_response.status_code == 200
+    temporary_password = approve_response.get_json()["temporaryPassword"]
+
+    client.post("/api/auth/logout")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "nora", "password": temporary_password},
+    )
+    assert login_response.status_code == 200
+
+
+def test_password_reset_request_accepts_email(client):
+    create_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "olivia",
+            "displayName": "Olivia",
+            "email": "olivia@example.com",
+            "password": "OliviaPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert create_response.status_code == 201
+
+    request_response = client.post(
+        "/api/auth/password-reset-requests",
+        json={"account": "olivia@example.com", "message": "我想用邮箱找回密码。"},
+    )
+    assert request_response.status_code == 201
+    payload = request_response.get_json()["request"]
+    assert payload["username"] == "olivia"
+    assert payload["email"] == "olivia@example.com"
 
 
 def test_create_meeting_returns_password_once(client):
@@ -278,11 +540,10 @@ def test_init_db_migrates_existing_meetings_table(tmp_path, monkeypatch):
                 cancelled_at TEXT
             );
             """
-        )
+    )
 
     monkeypatch.setenv("DATABASE_PATH", str(db_path))
-    for module_name in ["config", "database"]:
-        sys.modules.pop(module_name, None)
+    reset_app_modules()
 
     from database import init_db
 
@@ -353,14 +614,14 @@ def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, m
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
     monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
-    for module_name in ["config", "database", "services", "app"]:
-        sys.modules.pop(module_name, None)
+    reset_app_modules()
 
     from app import create_app
 
     app = create_app()
     app.config.update(TESTING=True)
     with app.test_client() as test_client:
+        create_logged_in_admin(test_client)
         response = test_client.post("/api/meetings", json={"title": "旧库兼容", "hostName": "Alice"})
         recurring_response = test_client.post(
             "/api/meetings",
@@ -388,14 +649,14 @@ def test_access_url_uses_bookmeeting_origin_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
     monkeypatch.delenv("MEETING_LINK_ORIGIN", raising=False)
 
-    for module_name in ["config", "database", "services", "app"]:
-        sys.modules.pop(module_name, None)
+    reset_app_modules()
 
     from app import create_app
 
     app = create_app()
     app.config.update(TESTING=True)
     with app.test_client() as test_client:
+        create_logged_in_admin(test_client)
         response = test_client.post("/api/meetings", json={"title": "默认域名", "hostName": "Alice"})
 
     assert response.status_code == 201
@@ -409,8 +670,7 @@ def test_cors_allows_multiple_frontend_origins(tmp_path, monkeypatch):
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://127.0.0.1:5173,http://localhost:5173")
 
-    for module_name in ["config", "database", "services", "app"]:
-        sys.modules.pop(module_name, None)
+    reset_app_modules()
 
     from app import create_app
 
