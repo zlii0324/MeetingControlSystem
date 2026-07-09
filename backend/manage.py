@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import argparse
+import getpass
+import sys
+
+from auth import AuthError, create_admin_user, normalize_username, reset_user_password
+from database import init_db
+
+
+def prompt_required(label: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if value:
+            return value
+        if default is not None:
+            return default
+        print(f"{label}不能为空")
+
+
+def prompt_password() -> str:
+    while True:
+        password = getpass.getpass("密码: ")
+        confirm = getpass.getpass("确认密码: ")
+        if password != confirm:
+            print("两次输入的密码不一致")
+            continue
+        return password
+
+
+def create_admin(_args: argparse.Namespace) -> int:
+    init_db()
+
+    username = prompt_required("用户名")
+    display_name = prompt_required("用户昵称（真实姓名）", username)
+    email = prompt_required("邮箱")
+    password = prompt_password()
+
+    try:
+        user = create_admin_user(
+            username=username,
+            display_name=display_name,
+            email=email,
+            password=password,
+        )
+    except AuthError as exc:
+        print(f"创建失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(f"管理员已创建：{user['username']}")
+    return 0
+
+
+def reset_password(args: argparse.Namespace) -> int:
+    init_db()
+
+    try:
+        username = normalize_username(args.username)
+    except AuthError as exc:
+        print(f"用户名无效：{exc}", file=sys.stderr)
+        return 1
+
+    from database import get_connection
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if row is None:
+            print("用户不存在", file=sys.stderr)
+            return 1
+
+    try:
+        result = reset_user_password(int(row["id"]))
+    except AuthError as exc:
+        print(f"重置失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(f"用户已重置：{result['user']['username']}")
+    print(f"临时密码：{result['temporaryPassword']}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="会议管理系统维护命令")
+    subparsers = parser.add_subparsers(dest="command")
+
+    create_admin_parser = subparsers.add_parser("create-admin", help="创建管理员账号")
+    create_admin_parser.set_defaults(func=create_admin)
+
+    reset_password_parser = subparsers.add_parser("reset-password", help="重置指定用户密码")
+    reset_password_parser.add_argument("username", help="用户名")
+    reset_password_parser.set_defaults(func=reset_password)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 1
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

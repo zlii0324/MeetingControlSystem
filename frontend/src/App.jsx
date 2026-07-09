@@ -21,6 +21,7 @@ import {
   Typography,
   DatePicker,
   message,
+  // TimePicker,
 } from "antd";
 import dayjs from "dayjs";
 import {
@@ -31,26 +32,47 @@ import {
   Edit3,
   ExternalLink,
   Link2,
+  LogOut,
   LockKeyhole,
   Plus,
   RefreshCw,
   Repeat2,
+  ShieldCheck,
   Trash2,
+  UserCheck,
+  UserPlus,
   Users,
   Video,
+  XCircle,
 } from "lucide-react";
 import {
+  approvePasswordResetRequest,
+  approveUser,
   createMeeting,
+  createUser,
   deleteMeeting,
+  deleteUser,
   fetchAccessLogs,
+  fetchCurrentUser,
   fetchMeetings,
+  fetchPasswordResetRequests,
   fetchPublicMeeting,
+  fetchUsers,
+  login,
+  logout,
+  registerAccount,
+  rejectPasswordResetRequest,
+  rejectUser,
+  requestPasswordReset,
+  resetUserPassword,
+  updateUser,
   updateMeeting,
   verifyMeetingPassword,
+    changePassword,
 } from "./api";
 
 const { Text, Title } = Typography;
-const { RangePicker } = DatePicker;
+// const { RangePicker } = DatePicker;
 const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
 const joinLinkOrigin = import.meta.env.VITE_JOIN_LINK_ORIGIN || "http://bookmeeting.wusupower.com";
 
@@ -68,8 +90,29 @@ const recurrenceTypeOptions = [
   { label: "每月", value: "monthly" },
 ];
 
+const roleLabels = {
+  admin: "管理员",
+  scheduler: "员工",
+};
+
+const userStatusLabels = {
+  pending: "待审核",
+  active: "正常",
+  rejected: "已拒绝",
+  disabled: "已停用",
+};
+
+const userStatusColors = {
+  pending: "processing",
+  active: "success",
+  rejected: "error",
+  disabled: "default",
+};
+
 function toPayload(values) {
-  const [start, end] = values.timeRange || [];
+  // const [start, end] = values.timeRange || [];
+  const start = values.startTime;
+  const end = values.endTime;
   const payload = {
     title: values.title,
     hostName: values.hostName,
@@ -97,7 +140,8 @@ function toFormValues(meeting) {
     title: meeting.title,
     hostName: meeting.hostName,
     attendees: meeting.attendees || [],
-    timeRange: [dayjs(meeting.startTime), dayjs(meeting.endTime)],
+    startTime: dayjs(meeting.startTime),
+    endTime: dayjs(meeting.endTime),
     maxOccupants: meeting.maxOccupants,
     passwordRequired: meeting.passwordRequired,
   };
@@ -230,10 +274,11 @@ function formatCalendarRange(value, view) {
   return `${start.format("YYYY年 M月D日")} - ${end.format("YYYY年 M月D日")}`;
 }
 
-function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loading }) {
+function MeetingFormModal({ open, mode, initialValues, currentUser, onCancel, onSubmit, loading }) {
   const [form] = Form.useForm();
   const recurrenceEnabled = Form.useWatch("recurrenceEnabled", form);
   const recurrenceType = Form.useWatch("recurrenceType", form);
+  const defaultHostName = currentUser?.displayName || "";
 
   useEffect(() => {
     if (!open) return;
@@ -253,9 +298,10 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
     const start = dayjs().minute(0).second(0).millisecond(0).add(1, "hour");
     form.setFieldsValue({
       title: "",
-      hostName: "",
+      hostName: defaultHostName,
       attendees: [],
-      timeRange: [start, start.add(1, "hour")],
+      startTime: start,
+      endTime: start.add(1, "hour"),
       maxOccupants: 30,
       passwordRequired: true,
       recurrenceEnabled: false,
@@ -263,7 +309,7 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
       recurrenceInterval: 1,
       recurrenceCount: 12,
     });
-  }, [form, initialValues, mode, open]);
+  }, [defaultHostName, form, initialValues, mode, open]);
 
   return (
     <Modal
@@ -276,7 +322,19 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
       destroyOnHidden
       className="meeting-modal"
     >
-      <Form layout="vertical" form={form} onFinish={(values) => onSubmit(toPayload(values))}>
+      <Form
+        layout="vertical"
+        form={form}
+        onFinish={(values) => {
+          const start = values.startTime;
+          const end = values.endTime;
+          if (start && end && !end.isAfter(start)) {
+            message.error("结束时间必须晚于开始时间");
+            return;
+          }
+          onSubmit(toPayload(values));
+        }}
+      >
         <Form.Item
           label="会议标题"
           name="title"
@@ -304,17 +362,36 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
         </Form.Item>
 
         <Form.Item
-          label="开始时间 / 结束时间"
-          name="timeRange"
+          label="开始时间"
+          name="startTime"
           rules={[{ required: true, message: "请选择会议时间" }]}
         >
-          <RangePicker
+          <DatePicker
+            showTime 
+            format="YYYY-MM-DD HH:mm"
+            placement="topLeft"
+            className="full-width"
+          />
+        </Form.Item>
+        <Form.Item
+          label="结束时间"
+          name="endTime"
+          rules={[{ required: true, message: "请选择会议结束时间" }]}
+        >
+          <DatePicker
             showTime
             format="YYYY-MM-DD HH:mm"
             placement="topLeft"
             className="full-width"
           />
         </Form.Item>
+        
+          {/* <RangePicker
+            showTime
+            format="YYYY-MM-DD HH:mm"
+            placement="topLeft"
+            className="full-width"
+          /> */}
 
         {mode === "create" && (
           <div className="recurrence-section">
@@ -347,7 +424,7 @@ function MeetingFormModal({ open, mode, initialValues, onCancel, onSubmit, loadi
                   name="recurrenceCount"
                   rules={[{ required: true, message: "请输入生成场次" }]}
                 >
-                  <InputNumber min={2} max={60} className="full-width" addonAfter="场" />
+                  <InputNumber min={2} max={1000} className="full-width" addonAfter="场" />
                 </Form.Item>
               </div>
             )}
@@ -584,11 +661,559 @@ function JoinPage({ roomId }) {
   );
 }
 
-function ManagementApp() {
+function AuthScreen({ onAuthenticated }) {
+  const [mode, setMode] = useState("login");
+  const [submitting, setSubmitting] = useState(false);
+  const [messageApi, contextHolder] = message.useMessage();
+
+  const handleLogin = async (values) => {
+    setSubmitting(true);
+    try {
+      const data = await login(values);
+      onAuthenticated(data.user);
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRegister = async (values) => {
+    setSubmitting(true);
+    try {
+      await registerAccount(values);
+      messageApi.success("申请已提交，请等待管理员审核");
+      setMode("login");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handlePasswordResetRequest = async (values) => {
+    setSubmitting(true);
+    try {
+      await requestPasswordReset(values);
+      messageApi.success("找回密码申请已提交，请等待管理员处理");
+      setMode("login");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="auth-shell">
+      {contextHolder}
+      <div className="auth-panel">
+        <div className="brand-block auth-brand">
+          <div className="brand-icon">
+            <Video size={24} />
+          </div>
+          <div>
+            <Title level={3}>会议管理系统</Title>
+            <Text type="secondary">登录后管理会议预约</Text>
+          </div>
+        </div>
+
+        <Segmented
+          block
+          value={mode}
+          onChange={setMode}
+          options={[
+            { label: "登录", value: "login" },
+            { label: "申请账号", value: "register" },
+            { label: "找回密码", value: "reset" },
+          ]}
+        />
+
+        {mode === "login" ? (
+          <Form layout="vertical" onFinish={handleLogin} className="auth-form">
+            <Form.Item
+              label="用户名"
+              name="username"
+              rules={[{ required: true, message: "请输入用户名" }]}
+            >
+              <Input autoFocus autoComplete="username" maxLength={40} />
+            </Form.Item>
+            <Form.Item
+              label="密码"
+              name="password"
+              rules={[{ required: true, message: "请输入密码" }]}
+            >
+              <Input.Password autoComplete="current-password" />
+            </Form.Item>
+            <Button
+              type="primary"
+              htmlType="submit"
+              size="large"
+              block
+              loading={submitting}
+              icon={<ShieldCheck size={18} />}
+            >
+              登录
+            </Button>
+          </Form>
+        ) : mode === "register" ? (
+          <Form layout="vertical" onFinish={handleRegister} className="auth-form">
+            <Form.Item
+              label="用户名"
+              name="username"
+              rules={[
+                { required: true, message: "请输入用户名" },
+                {
+                  pattern: /^[A-Za-z0-9_.-]{3,40}$/,
+                  message: "用户名需为 3-40 位字母、数字、点、横线或下划线",
+                },
+              ]}
+            >
+              <Input autoFocus autoComplete="username" maxLength={40} />
+            </Form.Item>
+            <Form.Item
+              label="用户昵称（真实姓名）"
+              name="displayName"
+              rules={[{ required: true, message: "请输入用户昵称（真实姓名）" }]}
+            >
+              <Input maxLength={80} />
+            </Form.Item>
+            <Form.Item
+              label="邮箱"
+              name="email"
+              rules={[
+                { required: true, message: "请输入邮箱" },
+                { type: "email", message: "邮箱格式无效" },
+              ]}
+            >
+              <Input autoComplete="email" maxLength={120} />
+            </Form.Item>
+            <Form.Item
+              label="密码"
+              name="password"
+              rules={[
+                { required: true, message: "请输入密码" },
+                { min: 8, message: "密码至少需要 8 位" },
+              ]}
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item
+              label="给管理员的留言"
+              name="registerMessage"
+              rules={[{ required: true, message: "请填写给管理员的留言" }]}
+            >
+              <Input.TextArea rows={3} maxLength={240} showCount />
+            </Form.Item>
+            <Button
+              type="primary"
+              htmlType="submit"
+              size="large"
+              block
+              loading={submitting}
+              icon={<UserPlus size={18} />}
+            >
+              提交申请
+            </Button>
+          </Form>
+        ) : (
+          <Form layout="vertical" onFinish={handlePasswordResetRequest} className="auth-form">
+            <Form.Item
+              label="用户名或邮箱"
+              name="account"
+              rules={[{ required: true, message: "请输入用户名或邮箱" }]}
+            >
+              <Input autoFocus autoComplete="username" maxLength={120} />
+            </Form.Item>
+            <Form.Item
+              label="给管理员的说明"
+              name="message"
+              rules={[{ required: true, message: "请填写找回密码说明" }]}
+            >
+              <Input.TextArea rows={3} maxLength={240} showCount />
+            </Form.Item>
+            <Button
+              type="primary"
+              htmlType="submit"
+              size="large"
+              block
+              loading={submitting}
+              icon={<LockKeyhole size={18} />}
+            >
+              提交找回申请
+            </Button>
+          </Form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminReviewSection({ pendingUsers, loadingId, onApprove, onReject, onRefresh }) {
+  return (
+    <section className="side-section review-section">
+      <Flex align="center" justify="space-between">
+        <Space size={8}>
+          <Text strong>账号审核</Text>
+          <Badge count={pendingUsers.length} size="small" />
+        </Space>
+        <Button
+          type="text"
+          icon={<RefreshCw size={16} />}
+          onClick={onRefresh}
+          aria-label="刷新账号审核"
+        />
+      </Flex>
+      <List
+        size="small"
+        dataSource={pendingUsers}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无待审核账号" /> }}
+        renderItem={(item) => (
+          <List.Item>
+            <div className="review-line">
+              <div className="review-copy">
+                <Text strong>{item.displayName}</Text>
+                <Text type="secondary">@{item.username}</Text>
+                <Text className="review-message">{item.registerMessage}</Text>
+              </div>
+              <Space size={6} wrap>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<UserCheck size={14} />}
+                  loading={loadingId === item.id}
+                  onClick={() => onApprove(item)}
+                >
+                  通过
+                </Button>
+                <Popconfirm
+                  title="拒绝账号申请"
+                  description="被拒绝的账号不能登录系统。"
+                  okText="拒绝"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => onReject(item)}
+                >
+                  <Button size="small" danger icon={<XCircle size={14} />} loading={loadingId === item.id}>
+                    拒绝
+                  </Button>
+                </Popconfirm>
+              </Space>
+            </div>
+          </List.Item>
+        )}
+      />
+    </section>
+  );
+}
+
+function PasswordResetSection({ requests, loadingId, onApprove, onReject, onRefresh }) {
+  return (
+    <section className="side-section review-section">
+      <Flex align="center" justify="space-between">
+        <Space size={8}>
+          <Text strong>密码找回</Text>
+          <Badge count={requests.length} size="small" />
+        </Space>
+        <Button
+          type="text"
+          icon={<RefreshCw size={16} />}
+          onClick={onRefresh}
+          aria-label="刷新密码找回"
+        />
+      </Flex>
+      <List
+        size="small"
+        dataSource={requests}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无找回申请" /> }}
+        renderItem={(item) => (
+          <List.Item>
+            <div className="review-line">
+              <div className="review-copy">
+                <Text strong>{item.displayName}</Text>
+                <Text type="secondary">@{item.username}</Text>
+                <Text className="review-message">{item.message}</Text>
+              </div>
+              <Space size={6} wrap>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<LockKeyhole size={14} />}
+                  loading={loadingId === item.id}
+                  onClick={() => onApprove(item)}
+                >
+                  重置
+                </Button>
+                <Popconfirm
+                  title="拒绝找回申请"
+                  description="此申请会被标记为已拒绝。"
+                  okText="拒绝"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => onReject(item)}
+                >
+                  <Button size="small" danger icon={<XCircle size={14} />} loading={loadingId === item.id}>
+                    拒绝
+                  </Button>
+                </Popconfirm>
+              </Space>
+            </div>
+          </List.Item>
+        )}
+      />
+    </section>
+  );
+}
+
+function UserFormModal({ open, mode, initialValues, loading, onCancel, onSubmit }) {
+  const [form] = Form.useForm();
+
+  useEffect(() => {
+    if (!open) return;
+    form.resetFields();
+    if (mode === "edit" && initialValues) {
+      form.setFieldsValue({
+        displayName: initialValues.displayName,
+        email: initialValues.email,
+        role: initialValues.role,
+        status: initialValues.status,
+      });
+      return;
+    }
+    form.setFieldsValue({
+      role: "scheduler",
+      status: "active",
+    });
+  }, [form, initialValues, mode, open]);
+
+  return (
+    <Modal
+      title={mode === "edit" ? "编辑用户" : "新建用户"}
+      open={open}
+      onCancel={onCancel}
+      footer={null}
+      centered
+      width={520}
+      destroyOnHidden
+    >
+      <Form layout="vertical" form={form} onFinish={onSubmit}>
+        {mode === "create" && (
+          <Form.Item
+            label="用户名"
+            name="username"
+            rules={[
+              { required: true, message: "请输入用户名" },
+              {
+                pattern: /^[A-Za-z0-9_.-]{3,40}$/,
+                message: "用户名需为 3-40 位字母、数字、点、横线或下划线",
+              },
+            ]}
+          >
+            <Input maxLength={40} />
+          </Form.Item>
+        )}
+
+        <Form.Item
+          label="用户昵称（真实姓名）"
+          name="displayName"
+          rules={[{ required: true, message: "请输入用户昵称（真实姓名）" }]}
+        >
+          <Input maxLength={80} />
+        </Form.Item>
+
+        <Form.Item
+          label="邮箱"
+          name="email"
+          rules={[
+            { required: true, message: "请输入邮箱" },
+            { type: "email", message: "邮箱格式无效" },
+          ]}
+        >
+          <Input maxLength={120} />
+        </Form.Item>
+
+        {mode === "create" && (
+          <Form.Item
+            label="初始密码"
+            name="password"
+            rules={[
+              { required: true, message: "请输入初始密码" },
+              { min: 8, message: "密码至少需要 8 位" },
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+        )}
+
+        <div className="form-grid">
+          <Form.Item label="角色" name="role" rules={[{ required: true, message: "请选择角色" }]}>
+            <Select
+              options={[
+                { label: "员工", value: "scheduler" },
+                { label: "管理员", value: "admin" },
+              ]}
+            />
+          </Form.Item>
+
+          <Form.Item label="状态" name="status" rules={[{ required: true, message: "请选择状态" }]}>
+            <Select
+              options={[
+                { label: "正常", value: "active" },
+                { label: "待审核", value: "pending" },
+                { label: "已拒绝", value: "rejected" },
+                { label: "已停用", value: "disabled" },
+              ]}
+            />
+          </Form.Item>
+        </div>
+
+        <Flex justify="end" gap={10} className="modal-actions">
+          <Button onClick={onCancel}>取消</Button>
+          <Button type="primary" htmlType="submit" loading={loading} icon={<UserCheck size={16} />}>
+            保存
+          </Button>
+        </Flex>
+      </Form>
+    </Modal>
+  );
+}
+
+function TemporaryPasswordModal({ result, onClose, onCopy }) {
+  const temporaryPassword = result?.temporaryPassword;
+  return (
+    <Modal
+      title="临时密码"
+      open={Boolean(result)}
+      onCancel={onClose}
+      footer={[
+        <Button key="close" type="primary" onClick={onClose}>
+          完成
+        </Button>,
+      ]}
+      centered
+      width={520}
+    >
+      {result && (
+        <div className="result-box">
+          <Text type="secondary">
+            请把临时密码发给 {result.user?.displayName || result.request?.displayName}，对方登录后应尽快联系管理员再次修改。
+          </Text>
+          <div className="copy-line password-line">
+            <Text className="copy-value">{temporaryPassword}</Text>
+            <Button
+              icon={<Clipboard size={16} />}
+              onClick={() => onCopy(temporaryPassword)}
+              aria-label="复制临时密码"
+            />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function UserManagementDrawer({
+  open,
+  users,
+  currentUser,
+  loadingId,
+  onClose,
+  onCreate,
+  onEdit,
+  onDelete,
+  onResetPassword,
+}) {
+  return (
+    <Drawer
+      title="用户管理"
+      open={open}
+      onClose={onClose}
+      width={640}
+      extra={
+        <Button type="primary" icon={<UserPlus size={16} />} onClick={onCreate}>
+          新建用户
+        </Button>
+      }
+    >
+      <List
+        dataSource={users}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无用户" /> }}
+        renderItem={(item) => (
+          <List.Item>
+            <div className="user-row">
+              <div className="user-row-main">
+                <Space wrap size={8}>
+                  <Text strong>{item.displayName}</Text>
+                  <Text type="secondary">@{item.username}</Text>
+                  {item.id === currentUser.id && <Tag color="cyan">当前账号</Tag>}
+                </Space>
+                <Text type="secondary">{item.email || "未填写邮箱"}</Text>
+                <Space wrap size={6}>
+                  <Tag color={item.role === "admin" ? "gold" : "blue"}>
+                    {roleLabels[item.role] || item.role}
+                  </Tag>
+                  <Tag color={userStatusColors[item.status] || "default"}>
+                    {userStatusLabels[item.status] || item.status}
+                  </Tag>
+                </Space>
+              </div>
+              <Space size={6} wrap className="user-row-actions">
+                <Button size="small" icon={<Edit3 size={14} />} onClick={() => onEdit(item)}>
+                  编辑
+                </Button>
+                <Popconfirm
+                  title="重置用户密码"
+                  description="系统会生成临时密码并让旧会话失效。"
+                  okText="重置"
+                  cancelText="取消"
+                  onConfirm={() => onResetPassword(item)}
+                >
+                  <Button size="small" icon={<LockKeyhole size={14} />} loading={loadingId === item.id}>
+                    重置密码
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title="删除用户"
+                  description="删除后该用户不能再登录系统。"
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => onDelete(item)}
+                >
+                  <Button size="small" danger icon={<Trash2 size={14} />} loading={loadingId === item.id}>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </Space>
+            </div>
+          </List.Item>
+        )}
+      />
+    </Drawer>
+  );
+}
+
+function ManagementApp({ currentUser, onLogout }) {
   const [meetings, setMeetings] = useState([]);
   const [accessLogs, setAccessLogs] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [pendingUsers, setPendingUsers] = useState([]);
+  const [passwordResetRequests, setPasswordResetRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [reviewingId, setReviewingId] = useState(null);
+  const [passwordResetReviewingId, setPasswordResetReviewingId] = useState(null);
+  const [userActionId, setUserActionId] = useState(null);
+  const [userSaving, setUserSaving] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [passwordForm] = Form.useForm();
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [passwordChanging, setPasswordChanging] = useState(false);
+  const [userDrawerOpen, setUserDrawerOpen] = useState(false);
+  const [userFormOpen, setUserFormOpen] = useState(false);
+  const [userFormMode, setUserFormMode] = useState("create");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [temporaryPasswordResult, setTemporaryPasswordResult] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [formMode, setFormMode] = useState("create");
   const [selectedMeeting, setSelectedMeeting] = useState(null);
@@ -596,16 +1221,29 @@ function ManagementApp() {
   const [calendarValue, setCalendarValue] = useState(dayjs());
   const [calendarView, setCalendarView] = useState("week");
   const [messageApi, contextHolder] = message.useMessage();
+  const isAdmin = currentUser?.role === "admin";
 
   const loadData = async ({ silent = false } = {}) => {
     if (!silent) {
       setLoading(true);
     }
     try {
-      const [meetingData, logData] = await Promise.all([fetchMeetings(), fetchAccessLogs()]);
+      const requests = [fetchMeetings(), fetchAccessLogs()];
+      if (isAdmin) {
+        requests.push(fetchUsers(), fetchPasswordResetRequests("pending"));
+      }
+      const [meetingData, logData, userData, resetData] = await Promise.all(requests);
       setMeetings(meetingData.items || []);
       setAccessLogs(logData.items || []);
+      const userItems = isAdmin ? userData?.items || [] : [];
+      setUsers(userItems);
+      setPendingUsers(userItems.filter((item) => item.status === "pending"));
+      setPasswordResetRequests(isAdmin ? resetData?.items || [] : []);
     } catch (error) {
+      if (error.status === 401) {
+        onLogout();
+        return;
+      }
       messageApi.error(error.message);
     } finally {
       if (!silent) {
@@ -620,7 +1258,158 @@ function ManagementApp() {
       loadData({ silent: true });
     }, 30000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [currentUser?.id]);
+
+  const handleApproveUser = async (user) => {
+    setReviewingId(user.id);
+    try {
+      const data = await approveUser(user.id, "scheduler");
+      setUsers((items) => items.map((item) => (item.id === user.id ? data.user : item)));
+      setPendingUsers((items) => items.filter((item) => item.id !== user.id));
+      messageApi.success("账号已通过审核");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const handleRejectUser = async (user) => {
+    setReviewingId(user.id);
+    try {
+      const data = await rejectUser(user.id);
+      setUsers((items) => items.map((item) => (item.id === user.id ? data.user : item)));
+      setPendingUsers((items) => items.filter((item) => item.id !== user.id));
+      messageApi.success("账号申请已拒绝");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const handleApprovePasswordReset = async (item) => {
+    setPasswordResetReviewingId(item.id);
+    try {
+      const data = await approvePasswordResetRequest(item.id);
+      setPasswordResetRequests((items) => items.filter((requestItem) => requestItem.id !== item.id));
+      setUsers((items) => items.map((user) => (user.id === data.user.id ? data.user : user)));
+      setTemporaryPasswordResult(data);
+      messageApi.success("密码已重置");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setPasswordResetReviewingId(null);
+    }
+  };
+
+  const handleRejectPasswordReset = async (item) => {
+    setPasswordResetReviewingId(item.id);
+    try {
+      await rejectPasswordResetRequest(item.id);
+      setPasswordResetRequests((items) => items.filter((requestItem) => requestItem.id !== item.id));
+      messageApi.success("找回申请已拒绝");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setPasswordResetReviewingId(null);
+    }
+  };
+
+  const openCreateUser = () => {
+    setUserFormMode("create");
+    setSelectedUser(null);
+    setUserFormOpen(true);
+  };
+
+  const openEditUser = (user) => {
+    setUserFormMode("edit");
+    setSelectedUser(user);
+    setUserFormOpen(true);
+  };
+
+  const handleUserSubmit = async (values) => {
+    setUserSaving(true);
+    try {
+      if (userFormMode === "edit" && selectedUser) {
+        const data = await updateUser(selectedUser.id, values);
+        setUsers((items) => items.map((item) => (item.id === selectedUser.id ? data.user : item)));
+        setPendingUsers((items) =>
+          data.user.status === "pending"
+            ? items.map((item) => (item.id === data.user.id ? data.user : item))
+            : items.filter((item) => item.id !== data.user.id),
+        );
+        messageApi.success("用户已更新");
+      } else {
+        const data = await createUser(values);
+        setUsers((items) => [data.user, ...items]);
+        if (data.user.status === "pending") {
+          setPendingUsers((items) => [data.user, ...items]);
+        }
+        messageApi.success("用户已创建");
+      }
+      setUserFormOpen(false);
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setUserSaving(false);
+    }
+  };
+
+  const handleDeleteUser = async (user) => {
+    setUserActionId(user.id);
+    try {
+      await deleteUser(user.id);
+      setUsers((items) => items.filter((item) => item.id !== user.id));
+      setPendingUsers((items) => items.filter((item) => item.id !== user.id));
+      messageApi.success("用户已删除");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setUserActionId(null);
+    }
+  };
+
+  const handleResetUserPassword = async (user) => {
+    setUserActionId(user.id);
+    try {
+      const data = await resetUserPassword(user.id);
+      setUsers((items) => items.map((item) => (item.id === user.id ? data.user : item)));
+      setTemporaryPasswordResult(data);
+      messageApi.success("密码已重置");
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setUserActionId(null);
+    }
+  };
+  const handleChangePassword = async (values) => {
+  setPasswordChanging(true);
+
+  try {
+    await changePassword(values);
+    messageApi.success("密码已修改，请重新登录");
+    setPasswordModalOpen(false);
+    passwordForm.resetFields();
+    onLogout();
+  } catch (error) {
+    messageApi.error(error.message);
+  } finally {
+    setPasswordChanging(false);
+  }
+};
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await logout();
+    } catch {
+      // Local auth state is still cleared if the server-side session is already gone.
+    } finally {
+      setLoggingOut(false);
+      onLogout();
+    }
+  };
 
   const meetingsByDate = useMemo(() => {
     const grouped = new Map();
@@ -832,6 +1621,35 @@ function ManagementApp() {
           </div>
         </div>
 
+        {isAdmin && (
+          <>
+            <Button
+              block
+              icon={<Users size={18} />}
+              onClick={() => setUserDrawerOpen(true)}
+              className="user-management-button"
+            >
+              用户管理
+            </Button>
+
+            <AdminReviewSection
+              pendingUsers={pendingUsers}
+              loadingId={reviewingId}
+              onApprove={handleApproveUser}
+              onReject={handleRejectUser}
+              onRefresh={() => loadData({ silent: true })}
+            />
+
+            <PasswordResetSection
+              requests={passwordResetRequests}
+              loadingId={passwordResetReviewingId}
+              onApprove={handleApprovePasswordReset}
+              onReject={handleRejectPasswordReset}
+              onRefresh={() => loadData({ silent: true })}
+            />
+          </>
+        )}
+
         <section className="side-section">
           <Flex align="center" justify="space-between">
             <Text strong>最近接入</Text>
@@ -867,6 +1685,18 @@ function ManagementApp() {
             <Title level={2}>会议日历</Title>
             <Text type="secondary">点击会议实体查看链接、参会者和编辑入口</Text>
           </div>
+          <Space size={12} className="user-actions">
+            <div className="user-pill">
+              <Text strong>{currentUser.displayName}</Text>
+              <Text type="secondary">{roleLabels[currentUser.role] || currentUser.role}</Text>
+            </div>
+            <Button icon={<LockKeyhole size={16} />} onClick={() => setPasswordModalOpen(true)}>
+              修改密码
+            </Button>
+            <Button icon={<LogOut size={16} />} loading={loggingOut} onClick={handleLogout}>
+              退出
+            </Button>
+          </Space>
         </Flex>
 
         <Spin spinning={loading}>
@@ -1034,6 +1864,7 @@ function ManagementApp() {
         open={formOpen}
         mode={formMode}
         initialValues={formMode === "edit" ? selectedMeetingFresh : null}
+        currentUser={currentUser}
         loading={saving}
         onCancel={() => setFormOpen(false)}
         onSubmit={handleSubmit}
@@ -1044,8 +1875,137 @@ function ManagementApp() {
         onClose={() => setCreatedMeeting(null)}
         onCopy={copyText}
       />
+      <Modal
+        title="修改密码"
+        open={passwordModalOpen}
+        onCancel={() => {
+          setPasswordModalOpen(false);
+          passwordForm.resetFields();
+        }}
+        onOk={() => passwordForm.submit()}
+        confirmLoading={passwordChanging}
+        okText="确认修改"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Form form={passwordForm} layout="vertical" onFinish={handleChangePassword}>
+          <Form.Item
+            label="当前密码"
+            name="currentPassword"
+            rules={[{ required: true, message: "请输入当前密码" }]}
+          >
+            <Input.Password autoComplete="current-password" />
+          </Form.Item>
+
+          <Form.Item
+            label="新密码"
+            name="newPassword"
+            rules={[
+              { required: true, message: "请输入新密码" },
+              { min: 8, message: "密码至少需要 8 位" },
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+
+          <Form.Item
+            label="确认新密码"
+            name="confirmPassword"
+            dependencies={["newPassword"]}
+            rules={[
+              { required: true, message: "请再次输入新密码" },
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (!value || getFieldValue("newPassword") === value) {
+                    return Promise.resolve();
+                  }
+                  return Promise.reject(new Error("两次输入的新密码不一致"));
+                },
+              }),
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {isAdmin && (
+        <>
+          <UserManagementDrawer
+            open={userDrawerOpen}
+            users={users}
+            currentUser={currentUser}
+            loadingId={userActionId}
+            onClose={() => setUserDrawerOpen(false)}
+            onCreate={openCreateUser}
+            onEdit={openEditUser}
+            onDelete={handleDeleteUser}
+            onResetPassword={handleResetUserPassword}
+          />
+
+          <UserFormModal
+            open={userFormOpen}
+            mode={userFormMode}
+            initialValues={selectedUser}
+            loading={userSaving}
+            onCancel={() => setUserFormOpen(false)}
+            onSubmit={handleUserSubmit}
+          />
+
+          <TemporaryPasswordModal
+            result={temporaryPasswordResult}
+            onClose={() => setTemporaryPasswordResult(null)}
+            onCopy={copyText}
+          />
+        </>
+      )}
     </div>
   );
+}
+
+function ManagementGate() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadCurrentUser() {
+      try {
+        const data = await fetchCurrentUser();
+        if (active) {
+          setCurrentUser(data.user);
+        }
+      } catch {
+        if (active) {
+          setCurrentUser(null);
+        }
+      } finally {
+        if (active) {
+          setChecking(false);
+        }
+      }
+    }
+
+    loadCurrentUser();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (checking) {
+    return (
+      <div className="auth-shell">
+        <Spin />
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthScreen onAuthenticated={setCurrentUser} />;
+  }
+
+  return <ManagementApp currentUser={currentUser} onLogout={() => setCurrentUser(null)} />;
 }
 
 function App() {
@@ -1054,7 +2014,7 @@ function App() {
     return <JoinPage roomId={joinRoomId} />;
   }
 
-  return <ManagementApp />;
+  return <ManagementGate />;
 }
 
 export default App;

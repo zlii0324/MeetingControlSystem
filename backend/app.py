@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 import os
+from functools import wraps
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
+from auth import (
+    AuthError,
+    approve_password_reset_request,
+    approve_user,
+    create_user,
+    delete_user as delete_system_user,
+    get_authenticated_user,
+    get_user,
+    list_password_reset_requests,
+    list_users as list_system_users,
+    login_user,
+    logout_token,
+    reject_password_reset_request,
+    register_user,
+    reject_user,
+    request_password_reset,
+    reset_user_password,
+    update_user as update_system_user,
+    change_own_password,
+)
 from config import config
 from database import init_db
 from services import (
@@ -24,18 +45,50 @@ from services import (
 )
 
 
+def current_session_token() -> str | None:
+    return request.cookies.get(config.session_cookie_name)
+
+
+def login_required(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        g.current_user = get_authenticated_user(current_session_token())
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
+def admin_required(function):
+    @wraps(function)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if g.current_user["role"] != "admin":
+            raise AuthError("需要管理员权限", 403)
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     init_db()
 
     if config.enable_cors:
         if config.frontend_origins:
-            CORS(app, resources={r"/api/*": {"origins": list(config.frontend_origins)}})
+            CORS(
+                app,
+                resources={r"/api/*": {"origins": list(config.frontend_origins)}},
+                supports_credentials=True,
+            )
         else:
-            CORS(app, resources={r"/api/*": {"origins": "*"}})
+            CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
     @app.errorhandler(MeetingError)
     def handle_meeting_error(error: MeetingError):
+        return jsonify({"message": str(error)}), error.status_code
+
+    @app.errorhandler(AuthError)
+    def handle_auth_error(error: AuthError):
         return jsonify({"message": str(error)}), error.status_code
 
     @app.errorhandler(404)
@@ -55,29 +108,155 @@ def create_app() -> Flask:
             }
         )
 
+    @app.post("/api/auth/register")
+    def auth_register():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": register_user(payload)}), 201
+
+    @app.post("/api/auth/password-reset-requests")
+    def auth_password_reset_request():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"request": request_password_reset(payload)}), 201
+
+    @app.post("/api/auth/login")
+    def auth_login():
+        payload = request.get_json(silent=True) or {}
+        result = login_user(
+            payload=payload,
+            ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
+            user_agent=request.headers.get("User-Agent"),
+        )
+        response = jsonify({"user": result["user"], "expiresAt": result["expiresAt"]})
+        response.set_cookie(
+            config.session_cookie_name,
+            result["token"],
+            max_age=max(1, config.session_ttl_days) * 24 * 60 * 60,
+            httponly=True,
+            secure=config.session_cookie_secure,
+            samesite=config.session_cookie_samesite,
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    def auth_logout():
+        logout_token(current_session_token())
+        response = jsonify({"ok": True})
+        response.delete_cookie(
+            config.session_cookie_name,
+            path="/",
+            secure=config.session_cookie_secure,
+            samesite=config.session_cookie_samesite,
+        )
+        return response
+
+    @app.get("/api/auth/me")
+    @login_required
+    def auth_me():
+        return jsonify({"user": g.current_user})
+    
+    @app.post("/api/auth/change-password")
+    @login_required
+    def auth_change_password():
+        payload = request.get_json(silent=True) or {}
+        change_own_password(g.current_user["id"], payload)
+
+        response = jsonify({"ok": True})
+        response.delete_cookie(
+            config.session_cookie_name,
+            path="/",
+            secure=config.session_cookie_secure,
+            samesite=config.session_cookie_samesite,
+        )
+        return response
+
+    @app.get("/api/admin/users")
+    @admin_required
+    def admin_users_index():
+        return jsonify({"items": list_system_users(request.args.get("status"))})
+
+    @app.post("/api/admin/users")
+    @admin_required
+    def admin_users_create():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": create_user(payload)}), 201
+
+    @app.get("/api/admin/users/<int:user_id>")
+    @admin_required
+    def admin_users_show(user_id: int):
+        return jsonify({"user": get_user(user_id)})
+
+    @app.patch("/api/admin/users/<int:user_id>")
+    @admin_required
+    def admin_users_update(user_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": update_system_user(user_id, payload)})
+
+    @app.delete("/api/admin/users/<int:user_id>")
+    @admin_required
+    def admin_users_delete(user_id: int):
+        return jsonify(delete_system_user(user_id, g.current_user["id"]))
+
+    @app.post("/api/admin/users/<int:user_id>/reset-password")
+    @admin_required
+    def admin_users_reset_password(user_id: int):
+        return jsonify(reset_user_password(user_id))
+
+    @app.post("/api/admin/users/<int:user_id>/approve")
+    @admin_required
+    def admin_users_approve(user_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": approve_user(user_id, g.current_user["id"], payload)})
+
+    @app.post("/api/admin/users/<int:user_id>/reject")
+    @admin_required
+    def admin_users_reject(user_id: int):
+        return jsonify({"user": reject_user(user_id)})
+
+    @app.get("/api/admin/password-reset-requests")
+    @admin_required
+    def admin_password_reset_requests_index():
+        return jsonify({"items": list_password_reset_requests(request.args.get("status"))})
+
+    @app.post("/api/admin/password-reset-requests/<int:request_id>/approve")
+    @admin_required
+    def admin_password_reset_requests_approve(request_id: int):
+        return jsonify(approve_password_reset_request(request_id, g.current_user["id"]))
+
+    @app.post("/api/admin/password-reset-requests/<int:request_id>/reject")
+    @admin_required
+    def admin_password_reset_requests_reject(request_id: int):
+        return jsonify({"request": reject_password_reset_request(request_id, g.current_user["id"])})
+
     @app.get("/api/meetings")
+    @login_required
     def meetings_index():
         return jsonify({"items": list_meetings(request.args.get("status"))})
 
     @app.post("/api/meetings")
+    @login_required
     def meetings_create():
         payload = request.get_json(silent=True) or {}
         return jsonify(create_meeting(payload)), 201
 
     @app.get("/api/meetings/<int:meeting_id>")
+    @login_required
     def meetings_show(meeting_id: int):
         return jsonify(get_meeting(meeting_id))
 
     @app.put("/api/meetings/<int:meeting_id>")
+    @login_required
     def meetings_update(meeting_id: int):
         payload = request.get_json(silent=True) or {}
         return jsonify(update_meeting(meeting_id, payload))
 
     @app.delete("/api/meetings/<int:meeting_id>")
+    @login_required
     def meetings_delete(meeting_id: int):
         return jsonify(delete_meeting(meeting_id, request.args.get("scope")))
 
     @app.get("/api/access-logs")
+    @login_required
     def access_logs_index():
         limit = int(request.args.get("limit", 100))
         return jsonify({"items": list_access_logs(limit)})
