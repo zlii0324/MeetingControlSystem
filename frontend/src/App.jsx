@@ -1096,7 +1096,7 @@ function TemporaryPasswordModal({ result, onClose, onCopy }) {
       {result && (
         <div className="result-box">
           <Text type="secondary">
-            请把临时密码发给 {result.user?.displayName || result.request?.displayName}，对方登录后应尽快联系管理员再次修改。
+            请把临时密码发给 {result.user?.displayName || result.request?.displayName}，对方登录后应尽快在右上角再次修改。
           </Text>
           <div className="copy-line password-line">
             <Text className="copy-value">{temporaryPassword}</Text>
