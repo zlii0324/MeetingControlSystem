@@ -111,14 +111,22 @@ def _create_meetings_table_sql(table_name: str = "meetings") -> str:
     """
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def get_connection() -> Generator[sqlite3.Connection, None, None]:
     db_path = Path(config.database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA cache_size = -64000")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def database_lock_path() -> Path:
