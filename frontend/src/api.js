@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -64,6 +64,15 @@ export function requestPasswordReset(values) {
 export function fetchUsers(status) {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
   return request(`/api/admin/users${query}`);
+}
+
+export function searchUserDirectory(query = "") {
+  const search = new URLSearchParams();
+  if (query.trim()) {
+    search.set("q", query.trim());
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return request(`/api/users/directory${suffix}`);
 }
 
 export function createUser(values) {

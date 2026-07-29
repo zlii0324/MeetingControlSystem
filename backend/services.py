@@ -11,6 +11,7 @@ from typing import Any
 from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
 from database import get_connection, process_write_lock
+from mailer import normalize_email_address, send_meeting_invitation_notifications
 
 
 STATUSES = {"Scheduled", "Running", "Finished", "Cancelled"}
@@ -224,6 +225,50 @@ def normalize_attendees(value: Any) -> list[str]:
     return attendees
 
 
+def _resolve_attendee_email_addresses(
+    conn: sqlite3.Connection,
+    attendees: list[str],
+) -> list[str]:
+    identifier_emails: dict[str, set[str]] = {}
+    user_rows = conn.execute(
+        """
+        SELECT username, display_name, email
+          FROM users
+         WHERE status = 'active'
+        """
+    ).fetchall()
+    for user in user_rows:
+        email = normalize_email_address(user["email"])
+        if email is None:
+            continue
+        identifiers = {
+            str(user["username"] or "").strip().casefold(),
+            f"@{str(user['username'] or '').strip().casefold()}",
+            str(user["display_name"] or "").strip().casefold(),
+            email.casefold(),
+        }
+        for identifier in identifiers:
+            if identifier:
+                identifier_emails.setdefault(identifier, set()).add(email)
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for attendee in attendees:
+        direct_email = normalize_email_address(attendee)
+        if direct_email:
+            candidates = {direct_email}
+        else:
+            candidates = identifier_emails.get(str(attendee).strip().casefold(), set())
+        if len(candidates) != 1:
+            continue
+        email = next(iter(candidates))
+        if email in seen:
+            continue
+        seen.add(email)
+        resolved.append(email)
+    return resolved
+
+
 def jitsi_url(room_id: str) -> str:
     return config.normalized_jitsi_base_url + room_id
 
@@ -275,7 +320,7 @@ def public_meeting(meeting: dict[str, Any], include_password: str | None = None)
         "maxOccupants": meeting["max_occupants"],
         "passwordRequired": password_required,
         "accessUrl": access_url(room_id),
-        "jitsiUrl": None if password_required else meeting["meeting_url"],
+        "jitsiUrl": None if password_required else jitsi_url(room_id),
         "meetingUrl": meeting_url(room_id, password_required),
         "createdAt": meeting["created_at"],
         "updatedAt": meeting["updated_at"],
@@ -415,7 +460,9 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
 
 
 @with_process_write_lock
-def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
+def _create_meeting(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], str | None, int]:
     title = str(payload.get("title", "")).strip()
     host_name = str(payload.get("hostName") or payload.get("host_name") or "").strip()
     mail_owner = str(payload.get("mailOwner") or payload.get("mail_owner") or "").strip() or None
@@ -513,16 +560,31 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
             tuple(meeting_ids),
         ).fetchall()
         meetings = [_attach_attendees(conn, dict(row)) for row in rows]
+        notification_recipients = _resolve_attendee_email_addresses(conn, attendees)
 
     response = public_meeting(meetings[0], include_password=password)
     if recurrence:
         response["createdCount"] = len(meetings)
         response["seriesMeetings"] = [public_meeting(meeting) for meeting in meetings]
+    return response, notification_recipients, password, len(meetings)
+
+
+def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
+    response, notification_recipients, password, occurrence_count = _create_meeting(payload)
+    response["emailNotification"] = send_meeting_invitation_notifications(
+        response,
+        notification_recipients,
+        password=password,
+        recurrence_count=occurrence_count,
+    )
     return response
 
 
 @with_process_write_lock
-def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+def _update_meeting(
+    meeting_id: int,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], str | None]:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if row is None:
@@ -555,6 +617,11 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
 
         attendees_present = "attendees" in payload
         attendees = normalize_attendees(payload.get("attendees")) if attendees_present else []
+        previous_notification_recipients = (
+            _resolve_attendee_email_addresses(conn, _get_attendees(conn, meeting_id))
+            if attendees_present
+            else []
+        )
         password_required = is_password_required(meeting)
         new_password: str | None = None
         password_hash_value = meeting["password_hash"]
@@ -613,9 +680,39 @@ def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
             _replace_attendees(conn, meeting_id, attendees)
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         meeting = _attach_attendees(conn, dict(row))
+        current_notification_recipients = (
+            _resolve_attendee_email_addresses(conn, attendees) if attendees_present else []
+        )
         conn.commit()
 
-    return public_meeting(meeting, include_password=new_password)
+    previous_recipient_set = set(previous_notification_recipients)
+    newly_added_recipients = [
+        email
+        for email in current_notification_recipients
+        if email not in previous_recipient_set
+    ]
+    notification_password = new_password
+    if newly_added_recipients and is_password_required(meeting) and not notification_password:
+        try:
+            notification_password = decrypt_password(
+                meeting["password_encrypted"],
+                config.password_secret,
+            )
+        except Exception:
+            notification_password = None
+
+    response = public_meeting(meeting, include_password=new_password)
+    return response, newly_added_recipients, notification_password
+
+
+def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    response, newly_added_recipients, notification_password = _update_meeting(meeting_id, payload)
+    response["emailNotification"] = send_meeting_invitation_notifications(
+        response,
+        newly_added_recipients,
+        password=notification_password,
+    )
+    return response
 
 
 @with_process_write_lock
@@ -718,7 +815,7 @@ def public_join_meeting(room_id: str) -> dict[str, Any]:
         "passwordRequired": password_required,
     }
     if not password_required:
-        payload["jitsiUrl"] = meeting["meeting_url"]
+        payload["jitsiUrl"] = jitsi_url(meeting["room_id"])
     return payload
 
 
@@ -744,14 +841,14 @@ def verify_join_password(
 
     if not is_password_required(meeting):
         log_access(room_id, meeting["id"], ip_address, user_agent, True)
-        return {"jitsiUrl": meeting["meeting_url"]}
+        return {"jitsiUrl": jitsi_url(meeting["room_id"])}
 
     if not password or not verify_password(str(password), meeting["password_hash"]):
         log_access(room_id, meeting["id"], ip_address, user_agent, False, "密码错误")
         raise MeetingError("密码错误", 403)
 
     log_access(room_id, meeting["id"], ip_address, user_agent, True)
-    return {"jitsiUrl": meeting["meeting_url"]}
+    return {"jitsiUrl": jitsi_url(meeting["room_id"])}
 
 
 @with_process_write_lock

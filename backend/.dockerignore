@@ -1,0 +1,10 @@
+.env
+instance
+venv
+__pycache__
+.pytest_cache
+tests
+*.log
+*.sqlite3
+*.sqlite3.lock
+*.db.lock

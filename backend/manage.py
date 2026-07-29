@@ -29,13 +29,31 @@ def prompt_password() -> str:
         return password
 
 
-def create_admin(_args: argparse.Namespace) -> int:
+def create_admin(args: argparse.Namespace) -> int:
     init_db()
 
-    username = prompt_required("用户名")
-    display_name = prompt_required("用户昵称（真实姓名）", username)
-    email = prompt_required("邮箱")
-    password = prompt_password()
+    username = args.username or prompt_required("用户名")
+    display_name = args.display_name or prompt_required("用户昵称（真实姓名）", username)
+    email = args.email or prompt_required("邮箱")
+    password = args.password or prompt_password()
+
+    if args.if_not_exists:
+        try:
+            normalized_username = normalize_username(username)
+        except AuthError as exc:
+            print(f"用户名无效：{exc}", file=sys.stderr)
+            return 1
+
+        from database import get_connection
+
+        with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT username FROM users WHERE username = ?",
+                (normalized_username,),
+            ).fetchone()
+        if existing is not None:
+            print(f"管理员已存在：{existing['username']}")
+            return 0
 
     try:
         user = create_admin_user(
@@ -85,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     create_admin_parser = subparsers.add_parser("create-admin", help="创建管理员账号")
+    create_admin_parser.add_argument("--username", help="用户名；省略时交互输入")
+    create_admin_parser.add_argument("--display-name", help="用户昵称（真实姓名）；省略时交互输入")
+    create_admin_parser.add_argument("--email", help="邮箱；省略时交互输入")
+    create_admin_parser.add_argument("--password", help="密码；省略时安全交互输入")
+    create_admin_parser.add_argument(
+        "--if-not-exists",
+        action="store_true",
+        help="同名用户已存在时正常退出，便于重复执行初始化",
+    )
     create_admin_parser.set_defaults(func=create_admin)
 
     reset_password_parser = subparsers.add_parser("reset-password", help="重置指定用户密码")

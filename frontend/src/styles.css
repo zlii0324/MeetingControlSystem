@@ -433,6 +433,23 @@ textarea {
   gap: 8px;
 }
 
+.attendee-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.attendee-option-name {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.attendee-option-meta {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .auth-shell {
   min-height: 100vh;
   padding: 32px 18px;

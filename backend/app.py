@@ -23,6 +23,7 @@ from auth import (
     reject_user,
     request_password_reset,
     reset_user_password,
+    search_user_directory,
     update_user as update_system_user,
     change_own_password,
 )
@@ -170,6 +171,11 @@ def create_app() -> Flask:
         )
         return response
 
+    @app.get("/api/users/directory")
+    @login_required
+    def users_directory():
+        return jsonify({"items": search_user_directory(request.args.get("q"))})
+
     @app.get("/api/admin/users")
     @admin_required
     def admin_users_index():
@@ -237,6 +243,7 @@ def create_app() -> Flask:
     @login_required
     def meetings_create():
         payload = request.get_json(silent=True) or {}
+        payload.setdefault("mailOwner", g.current_user["email"])
         return jsonify(create_meeting(payload)), 201
 
     @app.get("/api/meetings/<int:meeting_id>")

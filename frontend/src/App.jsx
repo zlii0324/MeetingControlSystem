@@ -21,7 +21,6 @@ import {
   Typography,
   DatePicker,
   message,
-  // TimePicker,
 } from "antd";
 import dayjs from "dayjs";
 import {
@@ -65,16 +64,19 @@ import {
   rejectUser,
   requestPasswordReset,
   resetUserPassword,
+  searchUserDirectory,
   updateUser,
   updateMeeting,
   verifyMeetingPassword,
-    changePassword,
+  changePassword,
 } from "./api";
 
 const { Text, Title } = Typography;
-// const { RangePicker } = DatePicker;
 const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
-const joinLinkOrigin = import.meta.env.VITE_JOIN_LINK_ORIGIN || "http://bookmeeting.wusupower.com";
+const joinLinkOrigin = (import.meta.env.VITE_JOIN_LINK_ORIGIN || window.location.origin).replace(
+  /\/+$/,
+  "",
+);
 
 const statusMap = {
   Scheduled: { text: "已预约", color: "processing", className: "status-scheduled" },
@@ -110,7 +112,6 @@ const userStatusColors = {
 };
 
 function toPayload(values) {
-  // const [start, end] = values.timeRange || [];
   const start = values.startTime;
   const end = values.endTime;
   const payload = {
@@ -149,6 +150,32 @@ function toFormValues(meeting) {
 
 function displayTime(value) {
   return value ? dayjs(value).format("YYYY-MM-DD HH:mm") : "-";
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function showMeetingSaveMessage(messageApi, successText, notification) {
+  if (!notification?.requested) {
+    messageApi.success(successText);
+    return;
+  }
+  if (notification.status === "sent") {
+    messageApi.success(`${successText}，已发送 ${notification.sent} 封通知邮件`);
+    return;
+  }
+  if (notification.status === "partial") {
+    messageApi.warning(
+      `${successText}，已发送 ${notification.sent}/${notification.requested} 封通知邮件`,
+    );
+    return;
+  }
+  if (notification.status === "disabled") {
+    messageApi.warning(`${successText}，但邮件通知尚未配置`);
+    return;
+  }
+  messageApi.warning(`${successText}，但通知邮件发送失败`);
 }
 
 function minutesBetween(start, end) {
@@ -276,13 +303,32 @@ function formatCalendarRange(value, view) {
 
 function MeetingFormModal({ open, mode, initialValues, currentUser, onCancel, onSubmit, loading }) {
   const [form] = Form.useForm();
+  const [attendeeQuery, setAttendeeQuery] = useState("");
+  const [directoryUsers, setDirectoryUsers] = useState([]);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
   const recurrenceEnabled = Form.useWatch("recurrenceEnabled", form);
   const recurrenceType = Form.useWatch("recurrenceType", form);
   const defaultHostName = currentUser?.displayName || "";
+  const attendeeOptions = useMemo(
+    () =>
+      directoryUsers.map((user) => ({
+        value: user.email,
+        label: `${user.displayName} (@${user.username})`,
+        displayName: user.displayName,
+        username: user.username,
+        email: user.email,
+      })),
+    [directoryUsers],
+  );
+  const legacyAttendees = useMemo(
+    () => new Set((initialValues?.attendees || []).map((attendee) => String(attendee))),
+    [initialValues],
+  );
 
   useEffect(() => {
     if (!open) return;
     form.resetFields();
+    setAttendeeQuery("");
 
     if (mode === "edit" && initialValues) {
       form.setFieldsValue({
@@ -310,6 +356,41 @@ function MeetingFormModal({ open, mode, initialValues, currentUser, onCancel, on
       recurrenceCount: 12,
     });
   }, [defaultHostName, form, initialValues, mode, open]);
+
+  useEffect(() => {
+    if (!open) {
+      setDirectoryUsers([]);
+      setDirectoryLoading(false);
+      return undefined;
+    }
+
+    let active = true;
+    const timer = window.setTimeout(
+      async () => {
+        setDirectoryLoading(true);
+        try {
+          const data = await searchUserDirectory(attendeeQuery);
+          if (active) {
+            setDirectoryUsers(data.items || []);
+          }
+        } catch {
+          if (active) {
+            setDirectoryUsers([]);
+          }
+        } finally {
+          if (active) {
+            setDirectoryLoading(false);
+          }
+        }
+      },
+      attendeeQuery.trim() ? 250 : 0,
+    );
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [attendeeQuery, open]);
 
   return (
     <Modal
@@ -351,11 +432,48 @@ function MeetingFormModal({ open, mode, initialValues, currentUser, onCancel, on
           <Input placeholder="例如：William Li" maxLength={60} />
         </Form.Item>
 
-        <Form.Item label="参会者名单" name="attendees">
+        <Form.Item
+          label="参会者名单"
+          name="attendees"
+          extra="请选择补全列表中的具体用户；外部参会者可直接输入完整邮箱"
+        >
           <Select
             mode="tags"
+            showSearch
+            filterOption={false}
+            options={attendeeOptions}
+            onSearch={setAttendeeQuery}
+            onChange={(values, selectedOptions = []) => {
+              const validValues = values.filter(
+                (value, index) =>
+                  selectedOptions[index]?.email || isEmailLike(value) || legacyAttendees.has(String(value)),
+              );
+              if (validValues.length !== values.length) {
+                form.setFieldValue("attendees", validValues);
+                message.warning("请选择补全列表中的具体用户，或输入完整邮箱");
+              }
+            }}
+            loading={directoryLoading}
+            notFoundContent={directoryLoading ? <Spin size="small" /> : "未找到匹配用户，可直接输入邮箱"}
+            optionRender={(option) =>
+              option.data.email ? (
+                <div className="attendee-option">
+                  <span className="attendee-option-name">{option.data.displayName}</span>
+                  <span className="attendee-option-meta">
+                    @{option.data.username} · {option.data.email}
+                  </span>
+                </div>
+              ) : (
+                <div className="attendee-option">
+                  <span className="attendee-option-name">{option.label}</span>
+                  <span className="attendee-option-meta">
+                    {isEmailLike(option.value) ? "按回车添加外部邮箱" : "请从匹配结果中选择具体用户"}
+                  </span>
+                </div>
+              )
+            }
             tokenSeparators={[",", ";", "\n"]}
-            placeholder="输入姓名或邮箱，回车添加"
+            placeholder="搜索姓名、用户名或邮箱"
             suffixIcon={<Users size={16} />}
             maxTagCount="responsive"
           />
@@ -732,11 +850,11 @@ function AuthScreen({ onAuthenticated }) {
         {mode === "login" ? (
           <Form layout="vertical" onFinish={handleLogin} className="auth-form">
             <Form.Item
-              label="用户名"
-              name="username"
-              rules={[{ required: true, message: "请输入用户名" }]}
+              label="用户名或邮箱"
+              name="account"
+              rules={[{ required: true, message: "请输入用户名或邮箱" }]}
             >
-              <Input autoFocus autoComplete="username" maxLength={40} />
+              <Input autoFocus autoComplete="username" maxLength={120} />
             </Form.Item>
             <Form.Item
               label="密码"
@@ -1472,7 +1590,7 @@ function ManagementApp({ currentUser, onLogout }) {
         if (updated.password) {
           setCreatedMeeting(updated);
         }
-        messageApi.success("会议已更新");
+        showMeetingSaveMessage(messageApi, "会议已更新", updated.emailNotification);
       } else {
         const created = await createMeeting(payload);
         const createdItems = created.seriesMeetings?.length
@@ -1480,7 +1598,11 @@ function ManagementApp({ currentUser, onLogout }) {
           : [created];
         setMeetings((items) => [...createdItems, ...items]);
         setCreatedMeeting(created);
-        messageApi.success(created.createdCount ? `已创建 ${created.createdCount} 场周期会议` : "会议已创建");
+        showMeetingSaveMessage(
+          messageApi,
+          created.createdCount ? `已创建 ${created.createdCount} 场周期会议` : "会议已创建",
+          created.emailNotification,
+        );
       }
       setFormOpen(false);
     } catch (error) {

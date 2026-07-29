@@ -13,7 +13,7 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-APP_MODULES = ["config", "database", "auth", "services", "app"]
+APP_MODULES = ["config", "database", "auth", "mailer", "services", "app"]
 ADMIN_PASSWORD = "AdminPass123!"
 
 
@@ -28,6 +28,7 @@ def configure_test_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("JITSI_BASE_URL", "https://meet.wusupower.com/")
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
     monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
+    monkeypatch.setenv("EMAIL_NOTIFICATIONS_ENABLED", "false")
 
 
 def create_logged_in_admin(test_client) -> None:
@@ -72,6 +73,50 @@ def test_management_api_requires_login(anonymous_client):
 
     assert response.status_code == 401
     assert response.get_json()["message"] == "请先登录"
+
+    directory_response = anonymous_client.get("/api/users/directory?q=alice")
+    assert directory_response.status_code == 401
+
+
+def test_user_directory_searches_only_active_users(client):
+    active_users = [
+        {
+            "username": "olivia",
+            "displayName": "Olivia Chen",
+            "email": "olivia@example.com",
+            "password": "OliviaPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+        {
+            "username": "oliver",
+            "displayName": "Oliver Li",
+            "email": "oliver@example.com",
+            "password": "OliverPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    ]
+    for user in active_users:
+        assert client.post("/api/admin/users", json=user).status_code == 201
+    assert client.post(
+        "/api/auth/register",
+        json={
+            "username": "pending-olivia",
+            "displayName": "Pending Olivia",
+            "email": "pending-olivia@example.com",
+            "password": "PendingPass123",
+            "registerMessage": "等待审核",
+        },
+    ).status_code == 201
+
+    response = client.get("/api/users/directory?q=oliv")
+
+    assert response.status_code == 200
+    items = response.get_json()["items"]
+    assert {item["username"] for item in items} == {"olivia", "oliver"}
+    assert {item["email"] for item in items} == {"olivia@example.com", "oliver@example.com"}
+    assert all(set(item) == {"id", "username", "displayName", "email"} for item in items)
 
 
 def test_registration_requires_admin_approval(anonymous_client):
@@ -296,6 +341,18 @@ def test_password_reset_request_accepts_email(client):
     assert payload["username"] == "olivia"
     assert payload["email"] == "olivia@example.com"
 
+    approve_response = client.post(f"/api/admin/password-reset-requests/{payload['id']}/approve")
+    assert approve_response.status_code == 200
+    temporary_password = approve_response.get_json()["temporaryPassword"]
+
+    client.post("/api/auth/logout")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"account": "olivia@example.com", "password": temporary_password},
+    )
+    assert login_response.status_code == 200
+    assert login_response.get_json()["user"]["username"] == "olivia"
+
 
 def test_create_meeting_returns_password_once(client):
     response = client.post(
@@ -321,6 +378,213 @@ def test_create_meeting_returns_password_once(client):
     assert "password" not in detail
     assert detail["attendees"] == ["Alice", "Bob"]
     assert "lobbyEnabled" not in detail
+
+
+def test_create_meeting_notifies_email_attendees_and_registered_users(client, monkeypatch):
+    import services
+
+    client.post(
+        "/api/admin/users",
+        json={
+            "username": "alice",
+            "displayName": "Alice Chen",
+            "email": "alice@example.com",
+            "password": "AlicePass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    sent = []
+
+    def record_notification(meeting, recipients, **kwargs):
+        sent.append((meeting, recipients, kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    monkeypatch.setattr(services, "send_meeting_invitation_notifications", record_notification)
+
+    response = client.post(
+        "/api/meetings",
+        json={
+            "title": "邮件通知测试",
+            "hostName": "Admin",
+            "attendees": ["external@example.com", "Alice Chen", "无法识别的姓名"],
+        },
+    )
+
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["mailOwner"] == "admin@example.com"
+    assert created["emailNotification"] == {"status": "sent", "requested": 2, "sent": 2}
+    assert len(sent) == 1
+    assert sent[0][1] == ["external@example.com", "alice@example.com"]
+    assert sent[0][2]["password"] == created["password"]
+
+
+def test_update_meeting_only_notifies_new_attendees(client, monkeypatch):
+    import services
+
+    sent = []
+
+    def record_notification(meeting, recipients, **kwargs):
+        sent.append((meeting, recipients, kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    monkeypatch.setattr(services, "send_meeting_invitation_notifications", record_notification)
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "新增参会者测试",
+            "hostName": "Admin",
+            "attendees": ["first@example.com"],
+        },
+    ).get_json()
+    sent.clear()
+
+    response = client.put(
+        f"/api/meetings/{created['id']}",
+        json={"attendees": ["first@example.com", "second@example.com"]},
+    )
+
+    assert response.status_code == 200
+    assert len(sent) == 1
+    assert sent[0][1] == ["second@example.com"]
+    assert sent[0][2]["password"] == created["password"]
+
+
+def test_mailer_sends_invitation_through_configured_smtp(monkeypatch):
+    from types import SimpleNamespace
+
+    import mailer
+
+    smtp_events = []
+    sent_messages = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            smtp_events.append(("connect", host, port, timeout))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            smtp_events.append(("close",))
+
+        def ehlo(self):
+            smtp_events.append(("ehlo",))
+
+        def starttls(self, context):
+            assert context is not None
+            smtp_events.append(("starttls",))
+
+        def login(self, username, password):
+            smtp_events.append(("login", username, password))
+
+        def send_message(self, message):
+            sent_messages.append(message)
+
+    monkeypatch.setattr(
+        mailer,
+        "config",
+        SimpleNamespace(
+            email_notifications_enabled=True,
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_username="mailer@example.com",
+            smtp_password="app-password",
+            smtp_use_tls=True,
+            smtp_use_ssl=False,
+            smtp_verify_certificate=True,
+            smtp_timeout_seconds=10,
+            email_from="meetings@example.com",
+            email_from_name="会议管理系统",
+            email_timezone="Asia/Shanghai",
+        ),
+    )
+    monkeypatch.setattr(mailer.smtplib, "SMTP", FakeSMTP)
+
+    result = mailer.send_meeting_invitation_notifications(
+        {
+            "title": "项目例会",
+            "hostName": "Admin",
+            "mailOwner": "admin@example.com",
+            "startTime": "2048-01-01T09:00:00Z",
+            "endTime": "2048-01-01T10:00:00Z",
+            "accessUrl": "https://meeting.example.com/join/example",
+        },
+        ["alice@example.com"],
+        password="1234",
+    )
+
+    assert result == {"status": "sent", "requested": 1, "sent": 1}
+    assert ("connect", "smtp.example.com", 587, 10) in smtp_events
+    assert ("starttls",) in smtp_events
+    assert ("login", "mailer@example.com", "app-password") in smtp_events
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["To"] == "alice@example.com"
+    assert sent_messages[0]["Reply-To"] == "admin@example.com"
+    assert "项目例会" in sent_messages[0]["Subject"]
+    assert "会议密码：1234" in sent_messages[0].get_content()
+
+
+def test_mailer_supports_ssl_with_explicitly_unverified_certificate(monkeypatch):
+    from types import SimpleNamespace
+
+    import mailer
+
+    smtp_events = []
+
+    class FakeSMTPSSL:
+        def __init__(self, host, port, timeout, context):
+            smtp_events.append(
+                ("connect", host, port, timeout, context.check_hostname, context.verify_mode)
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            smtp_events.append(("close",))
+
+        def login(self, username, password):
+            smtp_events.append(("login", username, password))
+
+        def send_message(self, message):
+            smtp_events.append(("send", message["To"]))
+
+    monkeypatch.setattr(
+        mailer,
+        "config",
+        SimpleNamespace(
+            email_notifications_enabled=True,
+            smtp_host="mail.example.com",
+            smtp_port=465,
+            smtp_username="mailer@example.com",
+            smtp_password="app-password",
+            smtp_use_tls=False,
+            smtp_use_ssl=True,
+            smtp_verify_certificate=False,
+            smtp_timeout_seconds=10,
+            email_from="meetings@example.com",
+            email_from_name="会议管理系统",
+            email_timezone="Asia/Shanghai",
+        ),
+    )
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", FakeSMTPSSL)
+
+    result = mailer.send_meeting_invitation_notifications(
+        {
+            "title": "SSL 邮件测试",
+            "hostName": "Admin",
+            "startTime": "2048-01-01T09:00:00Z",
+            "endTime": "2048-01-01T10:00:00Z",
+        },
+        ["alice@example.com"],
+    )
+
+    assert result == {"status": "sent", "requested": 1, "sent": 1}
+    assert ("connect", "mail.example.com", 465, 10, False, 0) in smtp_events
+    assert ("login", "mailer@example.com", "app-password") in smtp_events
+    assert ("send", "alice@example.com") in smtp_events
 
 
 def test_reservation_allocates_existing_room(client):

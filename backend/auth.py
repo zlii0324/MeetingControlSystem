@@ -303,14 +303,20 @@ def login_user(
     ip_address: str | None,
     user_agent: str | None,
 ) -> dict[str, Any]:
-    username = normalize_username(payload.get("username"))
+    identifier_type, identifier = normalize_account_identifier(
+        payload.get("account") or payload.get("username") or payload.get("email")
+    )
     password = str(payload.get("password") or "")
 
     with process_write_lock():
         with get_connection() as conn:
-            row = _fetch_user_by_username(conn, username)
+            row = (
+                _fetch_user_by_email(conn, identifier)
+                if identifier_type == "email"
+                else _fetch_user_by_username(conn, identifier)
+            )
             if row is None or not verify_password(password, row["password_hash"]):
-                raise AuthError("用户名或密码错误", 401)
+                raise AuthError("用户名、邮箱或密码错误", 401)
 
             if row["status"] == "pending":
                 raise AuthError("账号待管理员审核", 403)
@@ -501,6 +507,76 @@ def list_users(status: str | None = None) -> list[dict[str, Any]]:
     return [user_payload(row, include_review_fields=True) for row in rows]
 
 
+def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
+    normalized_query = str(query or "").strip().casefold()
+    if len(normalized_query) > 120:
+        raise AuthError("搜索内容不能超过 120 个字符")
+    normalized_limit = max(1, min(int(limit), 50))
+
+    with get_connection() as conn:
+        if normalized_query:
+            escaped_query = (
+                normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            pattern = f"%{escaped_query}%"
+            rows = conn.execute(
+                """
+                SELECT id, username, display_name, email
+                  FROM users
+                 WHERE status = 'active'
+                   AND (
+                        LOWER(username) LIKE ? ESCAPE '\\'
+                     OR LOWER(display_name) LIKE ? ESCAPE '\\'
+                     OR LOWER(email) LIKE ? ESCAPE '\\'
+                   )
+                 ORDER BY
+                    CASE
+                      WHEN LOWER(username) = ? THEN 0
+                      WHEN LOWER(email) = ? THEN 0
+                      WHEN LOWER(display_name) = ? THEN 1
+                      WHEN LOWER(username) LIKE ? ESCAPE '\\' THEN 2
+                      WHEN LOWER(display_name) LIKE ? ESCAPE '\\' THEN 3
+                      ELSE 4
+                    END,
+                    display_name COLLATE NOCASE ASC,
+                    username COLLATE NOCASE ASC
+                 LIMIT ?
+                """,
+                (
+                    pattern,
+                    pattern,
+                    pattern,
+                    normalized_query,
+                    normalized_query,
+                    normalized_query,
+                    f"{escaped_query}%",
+                    f"{escaped_query}%",
+                    normalized_limit,
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, username, display_name, email
+                  FROM users
+                 WHERE status = 'active'
+                 ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC
+                 LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+
+    return [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "displayName": row["display_name"],
+            "email": row["email"],
+        }
+        for row in rows
+    ]
+
+
 def get_user(user_id: int) -> dict[str, Any]:
     with get_connection() as conn:
         row = _fetch_user_by_id(conn, user_id)
@@ -611,6 +687,7 @@ def change_own_password(user_id: int, payload: dict[str, Any]) -> dict[str, Any]
 
     revoke_user_sessions(user_id)
     return {"ok": True}
+
 
 def reset_user_password(user_id: int) -> dict[str, Any]:
     temporary_password = generate_temporary_password()
