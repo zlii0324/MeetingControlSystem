@@ -10,7 +10,7 @@
 - 参会者名单管理
 - 参会者邮件邀请通知（需配置 SMTP）
 - 管理端账号登录、用户注册申请与管理员审核
-- 管理员用户管理、密码找回申请与临时密码重置
+- 邮件一次性链接找回密码，以及管理员协助的临时密码重置
 - 预留 Jitsi Reservation `/conference` 接口，当前阶段不用配置 Prosody
 
 当前 Jitsi 会议地址默认使用：
@@ -23,13 +23,24 @@ https://meet.wusupower.com/
 
 ## 快速启动
 
+支持 Linux、Windows 和 macOS。建议使用 Python 3.11+、Node.js 20+，或直接使用 Docker Desktop。
+
 ### Docker 三服务测试环境
 
 已提供一套仅绑定本机的测试环境，包含应用服务器、Mailpit 测试邮件服务器和官方 Jitsi 组件。先启动 Docker Desktop，然后运行：
 
+Linux / macOS：
+
 ```bash
 ./scripts/start-test-stack.sh
 ./scripts/smoke-test-stack.py
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-test-stack.ps1
+py .\scripts\smoke-test-stack.py
 ```
 
 访问入口：
@@ -55,6 +66,8 @@ docker compose -f compose.test.yml down --volumes
 
 ### 后端
 
+Linux / macOS：
+
 ```bash
 cd backend
 python3 -m venv venv
@@ -66,6 +79,18 @@ python manage.py create-admin
 python app.py
 ```
 
+Windows PowerShell：
+
+```powershell
+cd backend
+py -m venv venv
+.\venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+New-Item .env -ItemType File -Force
+py manage.py create-admin
+py app.py
+```
+
 后端默认运行在：
 
 ```text
@@ -74,10 +99,21 @@ http://0.0.0.0:5001
 
 ### 前端
 
+Linux / macOS：
+
 ```bash
 cd frontend
 npm install
 touch .env
+npm run dev
+```
+
+Windows PowerShell：
+
+```powershell
+cd frontend
+npm install
+New-Item .env -ItemType File -Force
 npm run dev
 ```
 

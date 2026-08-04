@@ -6,10 +6,12 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 from config import config
 from crypto import hash_password, verify_password
 from database import get_connection, process_write_lock
+from mailer import send_password_reset_email
 
 
 ROLES = {"admin", "scheduler"}
@@ -49,6 +51,13 @@ def normalize_display_name(value: Any) -> str:
     if len(display_name) > 80:
         raise AuthError("用户昵称（真实姓名）不能超过 80 个字符")
     return display_name
+
+
+def normalize_job_title(value: Any) -> str:
+    job_title = str(value or "").strip()
+    if len(job_title) > 80:
+        raise AuthError("职称不能超过 80 个字符")
+    return job_title
 
 
 def normalize_email(value: Any) -> str | None:
@@ -132,6 +141,9 @@ def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool 
         "username": data["username"],
         "displayName": data["display_name"],
         "email": data["email"],
+        "jobTitle": data.get("job_title", ""),
+        "emailNotificationsEnabled": bool(data.get("email_notifications_enabled", 1)),
+        "customThemeColor": data.get("custom_theme_color"),
         "role": data["role"],
         "status": data["status"],
         "createdAt": data["created_at"],
@@ -148,6 +160,59 @@ def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool 
             }
         )
     return payload
+
+
+def update_own_preferences(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    assignments: list[str] = []
+    values: list[Any] = []
+
+    if "emailNotificationsEnabled" in payload:
+        enabled = payload["emailNotificationsEnabled"]
+    elif "email_notifications_enabled" in payload:
+        enabled = payload["email_notifications_enabled"]
+    else:
+        enabled = None
+
+    if enabled is not None:
+        if not isinstance(enabled, bool):
+            raise AuthError("邮件提醒设置无效")
+        assignments.append("email_notifications_enabled = ?")
+        values.append(1 if enabled else 0)
+
+    custom_color_present = (
+        "customThemeColor" in payload or "custom_theme_color" in payload
+    )
+    if custom_color_present:
+        raw_custom_color = payload.get(
+            "customThemeColor",
+            payload.get("custom_theme_color"),
+        )
+        if raw_custom_color is None or str(raw_custom_color).strip() == "":
+            custom_color = None
+        else:
+            custom_color = str(raw_custom_color).strip().lower()
+            if not re.fullmatch(r"#[0-9a-f]{6}", custom_color):
+                raise AuthError("自定义颜色格式应为 #xxxxxx")
+        assignments.append("custom_theme_color = ?")
+        values.append(custom_color)
+
+    if not assignments:
+        raise AuthError("没有可更新的首选项")
+
+    now = isoformat(utc_now())
+    assignments.append("updated_at = ?")
+    values.extend([now, user_id])
+    with process_write_lock():
+        with get_connection() as conn:
+            if _fetch_user_by_id(conn, user_id) is None:
+                raise AuthError("用户不存在", 404)
+            conn.execute(
+                f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
+            row = _fetch_user_by_id(conn, user_id)
+
+    return user_payload(row)
 
 
 def password_reset_request_payload(row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
@@ -221,6 +286,7 @@ def register_user(payload: dict[str, Any]) -> dict[str, Any]:
     username = normalize_username(payload.get("username"))
     display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
     email = normalize_required_email(payload.get("email"))
+    job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
     password = normalize_password(payload.get("password"))
     register_message = normalize_register_message(
         payload.get("registerMessage") or payload.get("register_message")
@@ -236,15 +302,16 @@ def register_user(payload: dict[str, Any]) -> dict[str, Any]:
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, password_hash, role, status,
+                    username, display_name, email, job_title, password_hash, role, status,
                     register_message, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 'scheduler', 'pending', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'scheduler', 'pending', ?, ?, ?)
                 """,
                 (
                     username,
                     display_name,
                     email,
+                    job_title,
                     hash_password(password),
                     register_message,
                     now,
@@ -262,10 +329,12 @@ def create_admin_user(
     display_name: str,
     password: str,
     email: str,
+    job_title: str = "",
 ) -> dict[str, Any]:
     normalized_username = normalize_username(username)
     normalized_display_name = normalize_display_name(display_name)
     normalized_email = normalize_required_email(email)
+    normalized_job_title = normalize_job_title(job_title)
     normalized_password = normalize_password(password)
     now = isoformat(utc_now())
 
@@ -278,15 +347,16 @@ def create_admin_user(
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, password_hash, role, status,
+                    username, display_name, email, job_title, password_hash, role, status,
                     approved_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 'admin', 'active', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'admin', 'active', ?, ?, ?)
                 """,
                 (
                     normalized_username,
                     normalized_display_name,
                     normalized_email,
+                    normalized_job_title,
                     hash_password(normalized_password),
                     now,
                     now,
@@ -435,6 +505,7 @@ def create_user(payload: dict[str, Any]) -> dict[str, Any]:
     username = normalize_username(payload.get("username"))
     display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
     email = normalize_required_email(payload.get("email"))
+    job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
     password = normalize_password(payload.get("password"))
     role = normalize_role(payload.get("role"), "scheduler")
     status = normalize_user_status(payload.get("status"), "active")
@@ -449,15 +520,16 @@ def create_user(payload: dict[str, Any]) -> dict[str, Any]:
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, password_hash, role, status,
+                    username, display_name, email, job_title, password_hash, role, status,
                     approved_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     username,
                     display_name,
                     email,
+                    job_title,
                     hash_password(password),
                     role,
                     status,
@@ -521,13 +593,14 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
             pattern = f"%{escaped_query}%"
             rows = conn.execute(
                 """
-                SELECT id, username, display_name, email
+                SELECT id, username, display_name, email, job_title
                   FROM users
                  WHERE status = 'active'
                    AND (
                         LOWER(username) LIKE ? ESCAPE '\\'
                      OR LOWER(display_name) LIKE ? ESCAPE '\\'
                      OR LOWER(email) LIKE ? ESCAPE '\\'
+                     OR LOWER(job_title) LIKE ? ESCAPE '\\'
                    )
                  ORDER BY
                     CASE
@@ -536,7 +609,8 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
                       WHEN LOWER(display_name) = ? THEN 1
                       WHEN LOWER(username) LIKE ? ESCAPE '\\' THEN 2
                       WHEN LOWER(display_name) LIKE ? ESCAPE '\\' THEN 3
-                      ELSE 4
+                      WHEN LOWER(job_title) LIKE ? ESCAPE '\\' THEN 4
+                      ELSE 5
                     END,
                     display_name COLLATE NOCASE ASC,
                     username COLLATE NOCASE ASC
@@ -546,9 +620,11 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
                     pattern,
                     pattern,
                     pattern,
+                    pattern,
                     normalized_query,
                     normalized_query,
                     normalized_query,
+                    f"{escaped_query}%",
                     f"{escaped_query}%",
                     f"{escaped_query}%",
                     normalized_limit,
@@ -557,7 +633,7 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
         else:
             rows = conn.execute(
                 """
-                SELECT id, username, display_name, email
+                SELECT id, username, display_name, email, job_title
                   FROM users
                  WHERE status = 'active'
                  ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC
@@ -572,6 +648,7 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
             "username": row["username"],
             "displayName": row["display_name"],
             "email": row["email"],
+            "jobTitle": row["job_title"],
         }
         for row in rows
     ]
@@ -598,6 +675,11 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                 else row["display_name"]
             )
             email = normalize_required_email(payload.get("email")) if "email" in payload else row["email"]
+            job_title = (
+                normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
+                if "jobTitle" in payload or "job_title" in payload
+                else row["job_title"]
+            )
             role = normalize_role(payload.get("role"), row["role"]) if "role" in payload else row["role"]
             status = (
                 normalize_user_status(payload.get("status"), row["status"])
@@ -615,6 +697,7 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                 UPDATE users
                    SET display_name = ?,
                        email = ?,
+                       job_title = ?,
                        role = ?,
                        status = ?,
                        updated_at = ?,
@@ -624,7 +707,7 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                        END
                  WHERE id = ?
                 """,
-                (display_name, email, role, status, now, status, now, user_id),
+                (display_name, email, job_title, role, status, now, status, now, user_id),
             )
             row = _fetch_user_by_id(conn, user_id)
 
@@ -684,6 +767,15 @@ def change_own_password(user_id: int, payload: dict[str, Any]) -> dict[str, Any]
                 """,
                 (hash_password(new_password), now, user_id),
             )
+            conn.execute(
+                """
+                UPDATE password_reset_tokens
+                   SET used_at = ?
+                 WHERE user_id = ?
+                   AND used_at IS NULL
+                """,
+                (now, user_id),
+            )
 
     revoke_user_sessions(user_id)
     return {"ok": True}
@@ -708,6 +800,15 @@ def reset_user_password(user_id: int) -> dict[str, Any]:
                  WHERE id = ?
                 """,
                 (hash_password(temporary_password), now, user_id),
+            )
+            conn.execute(
+                """
+                UPDATE password_reset_tokens
+                   SET used_at = ?
+                 WHERE user_id = ?
+                   AND used_at IS NULL
+                """,
+                (now, user_id),
             )
             row = _fetch_user_by_id(conn, user_id)
 
@@ -769,6 +870,144 @@ def request_password_reset(payload: dict[str, Any]) -> dict[str, Any]:
             ).fetchone()
 
     return password_reset_request_payload(row)
+
+
+def request_email_password_reset(payload: dict[str, Any]) -> dict[str, Any]:
+    """Send a one-time reset link without disclosing whether the email is registered."""
+    email = normalize_required_email(payload.get("email"))
+    now = utc_now()
+    now_text = isoformat(now)
+    cooldown_seconds = max(0, config.password_reset_cooldown_seconds)
+    cooldown_start = isoformat(now - timedelta(seconds=cooldown_seconds))
+    expires_minutes = max(1, config.password_reset_token_ttl_minutes)
+    raw_token: str | None = None
+    user: sqlite3.Row | None = None
+    token_id: int | None = None
+
+    with process_write_lock():
+        with get_connection() as conn:
+            candidate = _fetch_user_by_email(conn, email)
+            if candidate is not None and candidate["status"] == "active":
+                recent = conn.execute(
+                    """
+                    SELECT id
+                      FROM password_reset_tokens
+                     WHERE user_id = ?
+                       AND used_at IS NULL
+                       AND expires_at > ?
+                       AND created_at >= ?
+                     ORDER BY id DESC
+                     LIMIT 1
+                    """,
+                    (candidate["id"], now_text, cooldown_start),
+                ).fetchone()
+                if recent is None:
+                    raw_token = secrets.token_urlsafe(32)
+                    expires_at = isoformat(now + timedelta(minutes=expires_minutes))
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO password_reset_tokens (
+                            user_id, token_hash, expires_at, created_at
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (candidate["id"], token_hash(raw_token), expires_at, now_text),
+                    )
+                    token_id = int(cursor.lastrowid)
+                    user = candidate
+
+    if raw_token is not None and user is not None and token_id is not None:
+        query = urlencode({"resetToken": raw_token})
+        reset_url = f"{config.password_reset_url_origin}/?{query}"
+        delivery = send_password_reset_email(
+            user["email"],
+            user["display_name"],
+            reset_url,
+            expires_minutes,
+        )
+
+        with process_write_lock():
+            with get_connection() as conn:
+                if delivery["status"] == "sent":
+                    conn.execute(
+                        """
+                        UPDATE password_reset_tokens
+                           SET used_at = ?
+                         WHERE user_id = ?
+                           AND id != ?
+                           AND used_at IS NULL
+                        """,
+                        (now_text, user["id"], token_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE password_reset_tokens
+                           SET used_at = ?
+                         WHERE id = ?
+                           AND used_at IS NULL
+                        """,
+                        (now_text, token_id),
+                    )
+
+    return {
+        "ok": True,
+        "message": "如果该邮箱与有效账号匹配，密码重置邮件将很快发送。",
+    }
+
+
+def reset_password_with_email_token(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_token = str(payload.get("token") or "").strip()
+    if not raw_token or len(raw_token) > 256:
+        raise AuthError("重置链接无效或已过期", 400)
+
+    new_password = normalize_password(payload.get("newPassword") or payload.get("new_password"))
+    confirm_password = str(
+        payload.get("confirmPassword") or payload.get("confirm_password") or ""
+    )
+    if new_password != confirm_password:
+        raise AuthError("两次输入的新密码不一致")
+
+    now_text = isoformat(utc_now())
+    user_id: int | None = None
+    with process_write_lock():
+        with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT password_reset_tokens.id AS reset_token_id, users.*
+                  FROM password_reset_tokens
+                  JOIN users ON users.id = password_reset_tokens.user_id
+                 WHERE password_reset_tokens.token_hash = ?
+                   AND password_reset_tokens.used_at IS NULL
+                   AND password_reset_tokens.expires_at > ?
+                """,
+                (token_hash(raw_token), now_text),
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                raise AuthError("重置链接无效或已过期", 400)
+
+            user_id = int(row["id"])
+            conn.execute(
+                """
+                UPDATE users
+                   SET password_hash = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (hash_password(new_password), now_text, user_id),
+            )
+            conn.execute(
+                """
+                UPDATE password_reset_tokens
+                   SET used_at = ?
+                 WHERE user_id = ?
+                   AND used_at IS NULL
+                """,
+                (now_text, user_id),
+            )
+
+    revoke_user_sessions(user_id)
+    return {"ok": True}
 
 
 def list_password_reset_requests(status: str | None = None) -> list[dict[str, Any]]:
@@ -852,6 +1091,15 @@ def approve_password_reset_request(request_id: int, admin_user_id: int) -> dict[
                  WHERE id = ?
                 """,
                 (admin_user_id, now, request_id),
+            )
+            conn.execute(
+                """
+                UPDATE password_reset_tokens
+                   SET used_at = ?
+                 WHERE user_id = ?
+                   AND used_at IS NULL
+                """,
+                (now, row["user_id"]),
             )
             request_row = conn.execute(
                 """

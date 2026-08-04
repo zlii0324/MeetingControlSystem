@@ -2,17 +2,105 @@
   box-sizing: border-box;
 }
 
+:root {
+  color-scheme: light;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --accent-contrast: #ffffff;
+  --app-bg: #f5f7f9;
+  --surface: #ffffff;
+  --surface-muted: #fafbfc;
+  --surface-soft: #f8fafb;
+  --outside-surface: #fbfcfd;
+  --border: #dde3ea;
+  --border-soft: #edf1f5;
+  --text-strong: #1f2937;
+  --text: #30343b;
+  --text-muted: #687385;
+  --text-faint: #b8c0ca;
+  --hover: #f3f6fa;
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+  --shadow: rgba(31, 41, 55, 0.12);
+}
+
+:root[data-color-theme="teal"] {
+  --accent: #0f8b8d;
+  --accent-strong: #0f6f71;
+}
+
+:root[data-color-theme="violet"] {
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
+}
+
+:root[data-color-theme="orange"] {
+  --accent: #ea580c;
+  --accent-strong: #c2410c;
+}
+
+:root[data-color-theme="rose"] {
+  --accent: #e11d48;
+  --accent-strong: #be123c;
+}
+
+:root[data-color-theme="emerald"] {
+  --accent: #059669;
+  --accent-strong: #047857;
+}
+
+:root[data-color-theme="indigo"] {
+  --accent: #4f46e5;
+  --accent-strong: #4338ca;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --app-bg: #0c1117;
+  --surface: #141b23;
+  --surface-muted: #1a232d;
+  --surface-soft: #111820;
+  --outside-surface: #10171f;
+  --border: #2b3745;
+  --border-soft: #25313e;
+  --text-strong: #edf2f7;
+  --text: #dce4ed;
+  --text-muted: #9aa8b8;
+  --text-faint: #667586;
+  --hover: #1f2a36;
+  --shadow: rgba(0, 0, 0, 0.38);
+}
+
 body {
   margin: 0;
   min-width: 320px;
-  color: #1d1f23;
-  background: #f5f7f9;
+  color: var(--text);
+  background: var(--app-bg);
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
 }
 
 button,
 input,
 textarea {
   font: inherit;
+}
+
+.refresh-icon.is-spinning {
+  animation: refresh-icon-spin 0.65s ease-in-out;
+}
+
+@keyframes refresh-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .refresh-icon.is-spinning {
+    animation: none;
+  }
 }
 
 .app-shell {
@@ -24,8 +112,8 @@ textarea {
 .side-panel {
   min-height: 100vh;
   padding: 24px;
-  border-right: 1px solid #dde3ea;
-  background: #ffffff;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -47,8 +135,8 @@ textarea {
   width: 46px;
   height: 46px;
   border-radius: 8px;
-  background: #0f8b8d;
-  color: #ffffff;
+  background: var(--accent);
+  color: var(--accent-contrast);
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -65,10 +153,10 @@ textarea {
 }
 
 .summary-grid > div {
-  border: 1px solid #e3e8ee;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
-  background: #fafbfc;
+  background: var(--surface-muted);
   min-height: 76px;
   display: flex;
   flex-direction: column;
@@ -78,12 +166,12 @@ textarea {
 .summary-grid strong {
   font-size: 26px;
   line-height: 1;
-  color: #1f2937;
+  color: var(--text-strong);
 }
 
 .summary-grid span {
   margin-top: 8px;
-  color: #687385;
+  color: var(--text-muted);
 }
 
 .side-section {
@@ -94,20 +182,32 @@ textarea {
   margin-top: 8px;
 }
 
-.log-line {
+.related-meeting-item {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background-color 0.18s ease;
+}
+
+.related-meeting-item:hover,
+.related-meeting-item:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+
+.related-meeting-line {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   width: 100%;
 }
 
-.log-line > div {
+.related-meeting-line > div {
   min-width: 0;
   display: flex;
   flex-direction: column;
 }
 
-.log-line .ant-typography {
+.related-meeting-line .ant-typography {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -124,16 +224,16 @@ textarea {
 }
 
 .meeting-calendar {
-  border: 1px solid #dde3ea;
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .calendar-toolbar {
   min-height: 64px;
   padding: 12px 16px;
-  border-bottom: 1px solid #e6ebf1;
+  border-bottom: 1px solid var(--border);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -158,8 +258,8 @@ textarea {
   height: 34px;
   display: grid;
   place-items: center;
-  border-bottom: 1px solid #edf1f5;
-  color: #30343b;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
   font-size: 15px;
   font-weight: 700;
 }
@@ -171,9 +271,9 @@ textarea {
   flex-direction: column;
   gap: 6px;
   overflow: hidden;
-  border-right: 1px solid #edf1f5;
-  border-top: 1px solid #edf1f5;
-  background: #ffffff;
+  border-right: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
   cursor: pointer;
   outline: none;
   transition:
@@ -190,21 +290,21 @@ textarea {
 }
 
 .calendar-cell.is-outside-month {
-  background: #fbfcfd;
+  background: var(--outside-surface);
 }
 
 .calendar-cell.is-outside-month .calendar-day {
-  color: #b8c0ca;
+  color: var(--text-faint);
 }
 
 .calendar-cell.is-selected-day {
-  background: #e8f4f3;
-  box-shadow: inset 0 2px 0 #0f8b8d;
+  background: var(--accent-soft);
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 
 .calendar-cell.is-today .calendar-day {
-  border: 1px solid #0f8b8d;
-  color: #0f6f71;
+  border: 1px solid var(--accent);
+  color: var(--accent-strong);
 }
 
 .calendar-day {
@@ -218,13 +318,13 @@ textarea {
   border-radius: 8px;
   font-size: 13px;
   font-weight: 600;
-  color: #374151;
+  color: var(--text-strong);
 }
 
 .calendar-cell.is-selected-day .calendar-day {
-  background: #0f8b8d;
-  border-color: #0f8b8d;
-  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .meeting-stack {
@@ -237,7 +337,7 @@ textarea {
   overscroll-behavior: contain;
   padding-right: 2px;
   scrollbar-width: thin;
-  scrollbar-color: #8fbfc0 transparent;
+  scrollbar-color: color-mix(in srgb, var(--accent) 58%, var(--surface)) transparent;
 }
 
 .meeting-stack::-webkit-scrollbar {
@@ -246,7 +346,7 @@ textarea {
 
 .meeting-stack::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: #8fbfc0;
+  background: color-mix(in srgb, var(--accent) 58%, var(--surface));
 }
 
 .meeting-stack::-webkit-scrollbar-track {
@@ -272,7 +372,7 @@ textarea {
 
 .meeting-chip:hover {
   transform: translateY(-1px);
-  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 3px 10px var(--shadow);
 }
 
 .chip-time {
@@ -304,8 +404,8 @@ textarea {
 }
 
 .status-scheduled {
-  background: #e9f6f6;
-  color: #0f6f71;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .status-running {
@@ -339,9 +439,9 @@ textarea {
 .recurrence-section {
   margin-bottom: 12px;
   padding: 12px;
-  border: 1px solid #e0e7ef;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fbfb;
+  background: var(--surface-soft);
 }
 
 .recurrence-section .ant-form-item:last-child {
@@ -373,10 +473,10 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid #cfe8e8;
+  border: 1px solid var(--accent-border);
   border-radius: 8px;
-  background: #f0fbfb;
-  color: #0f6f71;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .copy-line,
@@ -392,9 +492,9 @@ textarea {
   grid-template-columns: auto minmax(0, 1fr) auto;
   margin-top: 0;
   padding: 12px;
-  border: 1px solid #dfe6ed;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafb;
+  background: var(--surface-soft);
 }
 
 .copy-value,
@@ -403,6 +503,26 @@ textarea {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.calendar-subscription-content {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.subscription-url-box {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.subscription-help,
+.subscription-warning {
+  display: block;
+  line-height: 1.6;
 }
 
 .link-copy-content {
@@ -441,12 +561,12 @@ textarea {
 }
 
 .attendee-option-name {
-  color: #1f2937;
+  color: var(--text-strong);
   font-weight: 600;
 }
 
 .attendee-option-meta {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -456,17 +576,17 @@ textarea {
   display: grid;
   place-items: center;
   background:
-    linear-gradient(180deg, rgba(15, 139, 141, 0.08), rgba(255, 255, 255, 0)),
-    #f5f7f9;
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent),
+    var(--app-bg);
 }
 
 .auth-panel {
   width: min(100%, 430px);
   padding: 28px;
-  border: 1px solid #dde3ea;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 16px 36px rgba(31, 41, 55, 0.12);
+  background: var(--surface);
+  box-shadow: 0 16px 36px var(--shadow);
 }
 
 .auth-brand {
@@ -477,6 +597,16 @@ textarea {
   margin-top: 20px;
 }
 
+.reset-form {
+  margin-top: 18px;
+}
+
+.reset-form > .ant-typography {
+  display: block;
+  margin-bottom: 18px;
+  line-height: 1.6;
+}
+
 .user-actions {
   flex: 0 0 auto;
 }
@@ -484,9 +614,9 @@ textarea {
 .user-pill {
   min-width: 132px;
   padding: 7px 10px;
-  border: 1px solid #dfe6ed;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -527,7 +657,7 @@ textarea {
 }
 
 .review-message {
-  color: #475569;
+  color: var(--text-muted);
 }
 
 .user-row {
@@ -554,23 +684,76 @@ textarea {
   justify-content: flex-end;
 }
 
+.group-collapse-label {
+  width: 100%;
+  min-width: 0;
+  padding-right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.group-collapse-label > div:first-child {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.group-collapse-label .ant-typography {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.group-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.group-actions {
+  margin-top: 2px;
+}
+
+.group-member-row {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.group-member-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.group-member-copy > .ant-typography {
+  overflow-wrap: anywhere;
+}
+
 .join-shell {
   min-height: 100vh;
   padding: 32px 18px;
   display: grid;
   place-items: center;
   background:
-    linear-gradient(180deg, rgba(15, 139, 141, 0.08), rgba(255, 255, 255, 0)),
-    #f5f7f9;
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent),
+    var(--app-bg);
 }
 
 .join-panel {
   width: min(100%, 460px);
   padding: 28px;
-  border: 1px solid #dde3ea;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 16px 36px rgba(31, 41, 55, 0.12);
+  background: var(--surface);
+  box-shadow: 0 16px 36px var(--shadow);
 }
 
 .join-icon {
@@ -580,8 +763,131 @@ textarea {
   border-radius: 8px;
   display: grid;
   place-items: center;
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
+.preferences-card {
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 4px 0;
+}
+
+.preferences-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preference-toggle-row {
+  padding-top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.preference-toggle-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preference-toggle-copy .ant-typography:last-child {
+  font-size: 12px;
+}
+
+.preference-color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.preference-color-option {
+  min-width: 0;
+  padding: 8px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.preference-color-option:hover,
+.preference-color-option:focus-visible {
+  border-color: var(--swatch-color);
+  background: var(--hover);
+  outline: none;
+}
+
+.preference-color-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.preference-color-option.is-selected {
+  border-color: var(--swatch-color);
+  color: var(--text-strong);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch-color) 22%, transparent);
+}
+
+.preference-color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
   color: #ffffff;
-  background: #0f8b8d;
+  background: var(--swatch-color);
+  display: grid;
+  place-items: center;
+}
+
+.custom-color-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.custom-color-preview {
+  width: 14px;
+  height: 14px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.custom-color-help {
+  margin-top: -4px;
+  font-size: 12px;
+}
+
+:root[data-theme="dark"] .status-running {
+  background: #173526;
+  color: #79d59e;
+}
+
+:root[data-theme="dark"] .status-finished {
+  background: #28313c;
+  color: #a8b3c1;
+}
+
+:root[data-theme="dark"] .status-cancelled {
+  background: #3b2023;
+  color: #ff9d98;
+}
+
+:root[data-theme="dark"] .password-line .copy-value {
+  color: #fdba74;
 }
 
 .join-content {
@@ -605,7 +911,7 @@ textarea {
   .side-panel {
     min-height: auto;
     border-right: 0;
-    border-bottom: 1px solid #dde3ea;
+    border-bottom: 1px solid var(--border);
   }
 
   .calendar-panel {
@@ -635,6 +941,12 @@ textarea {
 
   .user-row {
     grid-template-columns: 1fr;
+  }
+
+  .group-collapse-label,
+  .group-member-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .user-row-actions {

@@ -8,7 +8,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 INSTANCE_DIR = BASE_DIR / "instance"
 ENV_FILE = BASE_DIR / ".env"
-DEFAULT_MEETING_LINK_ORIGIN = "http://bookmeeting.wusupower.com"
+DEFAULT_MEETING_LINK_ORIGIN = "http://localhost:5173"
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -102,6 +102,12 @@ class Config:
     email_from: str = os.getenv("EMAIL_FROM", "").strip()
     email_from_name: str = _as_str("EMAIL_FROM_NAME", "会议管理系统")
     email_timezone: str = _as_str("EMAIL_TIMEZONE", "Asia/Shanghai")
+    password_reset_url_origin: str = _as_str(
+        "PASSWORD_RESET_URL_ORIGIN",
+        _as_str("MEETING_LINK_ORIGIN", DEFAULT_MEETING_LINK_ORIGIN),
+    ).rstrip("/")
+    password_reset_token_ttl_minutes: int = _as_int("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30)
+    password_reset_cooldown_seconds: int = _as_int("PASSWORD_RESET_COOLDOWN_SECONDS", 60)
 
     @property
     def normalized_jitsi_base_url(self) -> str:

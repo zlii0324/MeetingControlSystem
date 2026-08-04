@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -13,7 +14,16 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-APP_MODULES = ["config", "database", "auth", "mailer", "services", "app"]
+APP_MODULES = [
+    "config",
+    "database",
+    "auth",
+    "mailer",
+    "groups",
+    "services",
+    "calendar_feed",
+    "app",
+]
 ADMIN_PASSWORD = "AdminPass123!"
 
 
@@ -84,6 +94,7 @@ def test_user_directory_searches_only_active_users(client):
             "username": "olivia",
             "displayName": "Olivia Chen",
             "email": "olivia@example.com",
+            "jobTitle": "高级工程师",
             "password": "OliviaPass123",
             "role": "scheduler",
             "status": "active",
@@ -92,6 +103,7 @@ def test_user_directory_searches_only_active_users(client):
             "username": "oliver",
             "displayName": "Oliver Li",
             "email": "oliver@example.com",
+            "jobTitle": "产品经理",
             "password": "OliverPass123",
             "role": "scheduler",
             "status": "active",
@@ -116,7 +128,294 @@ def test_user_directory_searches_only_active_users(client):
     items = response.get_json()["items"]
     assert {item["username"] for item in items} == {"olivia", "oliver"}
     assert {item["email"] for item in items} == {"olivia@example.com", "oliver@example.com"}
-    assert all(set(item) == {"id", "username", "displayName", "email"} for item in items)
+    assert {item["jobTitle"] for item in items} == {"高级工程师", "产品经理"}
+    assert all(
+        set(item) == {"id", "username", "displayName", "email", "jobTitle"}
+        for item in items
+    )
+
+    title_response = client.get("/api/users/directory?q=产品经理")
+    assert title_response.status_code == 200
+    assert [item["username"] for item in title_response.get_json()["items"]] == ["oliver"]
+
+
+def test_user_group_visibility_and_member_permissions(client):
+    users = {}
+    for username in ("alice", "bob", "charlie"):
+        response = client.post(
+            "/api/admin/users",
+            json={
+                "username": username,
+                "displayName": username.title(),
+                "email": f"{username}@example.com",
+                "password": f"{username.title()}Pass123",
+                "role": "scheduler",
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201
+        users[username] = response.get_json()["user"]
+
+    admin_group = client.post(
+        "/api/groups",
+        json={"name": "管理员组", "description": "只包含系统管理员"},
+    ).get_json()["group"]
+    assert admin_group["includesCurrentUser"] is True
+    assert admin_group["currentUserGroupRole"] == "admin"
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "alice", "password": "AlicePass123"},
+    ).status_code == 200
+    assert client.get("/api/groups").get_json()["items"] == []
+
+    created_response = client.post(
+        "/api/groups",
+        json={"name": "产品组", "description": "产品与研发成员"},
+    )
+    assert created_response.status_code == 201
+    product_group = created_response.get_json()["group"]
+    assert product_group["includesCurrentUser"] is True
+    assert product_group["currentUserGroupRole"] == "admin"
+    assert product_group["canAddMembers"] is True
+    assert product_group["canRemoveMembers"] is True
+    assert [member["username"] for member in product_group["members"]] == ["alice"]
+
+    add_bob = client.post(
+        f"/api/groups/{product_group['id']}/members",
+        json={"userId": users["bob"]["id"], "groupRole": "member"},
+    )
+    assert add_bob.status_code == 201
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "bob", "password": "BobPass123"},
+    ).status_code == 200
+    visible_groups = client.get("/api/groups").get_json()["items"]
+    assert [group["name"] for group in visible_groups] == ["产品组"]
+    assert visible_groups[0]["currentUserGroupRole"] == "member"
+    assert visible_groups[0]["canAddMembers"] is True
+    assert visible_groups[0]["canRemoveMembers"] is False
+
+    add_charlie = client.post(
+        f"/api/groups/{product_group['id']}/members",
+        json={"userId": users["charlie"]["id"], "groupRole": "member"},
+    )
+    assert add_charlie.status_code == 201
+    assert {member["username"] for member in add_charlie.get_json()["group"]["members"]} == {
+        "alice",
+        "bob",
+        "charlie",
+    }
+    assert client.delete(
+        f"/api/groups/{product_group['id']}/members/{users['charlie']['id']}"
+    ).status_code == 403
+    assert client.patch(
+        f"/api/groups/{product_group['id']}",
+        json={"name": "不允许普通成员修改"},
+    ).status_code == 403
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "alice", "password": "AlicePass123"},
+    ).status_code == 200
+    remove_charlie = client.delete(
+        f"/api/groups/{product_group['id']}/members/{users['charlie']['id']}"
+    )
+    assert remove_charlie.status_code == 200
+    assert {member["username"] for member in remove_charlie.get_json()["group"]["members"]} == {
+        "alice",
+        "bob",
+    }
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "admin", "password": ADMIN_PASSWORD},
+    ).status_code == 200
+    all_groups = client.get("/api/groups").get_json()["items"]
+    inclusion = {group["name"]: group["includesCurrentUser"] for group in all_groups}
+    assert inclusion == {"产品组": False, "管理员组": True}
+
+    update_response = client.patch(
+        f"/api/groups/{product_group['id']}",
+        json={"name": "产品研发组", "description": "系统管理员已更新"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.get_json()["group"]["name"] == "产品研发组"
+    delete_response = client.delete(f"/api/groups/{product_group['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.get_json() == {"deleted": True, "id": product_group["id"]}
+
+
+def test_group_can_add_multiple_members_in_one_request(client):
+    users = []
+    for username in ("batch-alice", "batch-bob", "batch-charlie"):
+        response = client.post(
+            "/api/admin/users",
+            json={
+                "username": username,
+                "displayName": username.title(),
+                "email": f"{username}@example.com",
+                "password": "BatchMemberPass123",
+                "role": "scheduler",
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201
+        users.append(response.get_json()["user"])
+
+    group = client.post("/api/groups", json={"name": "批量添加测试组"}).get_json()["group"]
+    response = client.post(
+        f"/api/groups/{group['id']}/members",
+        json={"userIds": [users[0]["id"], users[1]["id"]], "groupRole": "member"},
+    )
+
+    assert response.status_code == 201
+    assert {member["username"] for member in response.get_json()["group"]["members"]} == {
+        "admin",
+        "batch-alice",
+        "batch-bob",
+    }
+
+    add_with_existing = client.post(
+        f"/api/groups/{group['id']}/members",
+        json={"userIds": [users[1]["id"], users[2]["id"]], "groupRole": "member"},
+    )
+    assert add_with_existing.status_code == 201
+    assert {member["username"] for member in add_with_existing.get_json()["group"]["members"]} == {
+        "admin",
+        "batch-alice",
+        "batch-bob",
+        "batch-charlie",
+    }
+
+
+def test_meeting_can_expand_a_visible_user_group(client):
+    alice_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "group-alice",
+            "displayName": "Group Alice",
+            "email": "group-alice@example.com",
+            "password": "GroupAlicePass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert alice_response.status_code == 201
+    alice = alice_response.get_json()["user"]
+    outsider_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "group-outsider",
+            "displayName": "Group Outsider",
+            "email": "group-outsider@example.com",
+            "password": "GroupOutsiderPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert outsider_response.status_code == 201
+    group = client.post(
+        "/api/groups",
+        json={"name": "会议邀请组"},
+    ).get_json()["group"]
+    assert client.post(
+        f"/api/groups/{group['id']}/members",
+        json={"userId": alice["id"], "groupRole": "member"},
+    ).status_code == 201
+
+    meeting_response = client.post(
+        "/api/meetings",
+        json={
+            "title": "整组会议",
+            "hostName": "Admin",
+            "attendees": [group["selectionValue"], "external@example.com"],
+        },
+    )
+
+    assert meeting_response.status_code == 201
+    meeting = meeting_response.get_json()
+    assert set(meeting["attendees"]) == {
+        "admin@example.com",
+        "group-alice@example.com",
+        "external@example.com",
+    }
+    assert group["selectionValue"] not in meeting["attendees"]
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "group-outsider", "password": "GroupOutsiderPass123"},
+    ).status_code == 200
+    forbidden = client.post(
+        "/api/meetings",
+        json={
+            "title": "越权整组邀请",
+            "hostName": "Outsider",
+            "attendees": [group["selectionValue"]],
+        },
+    )
+    assert forbidden.status_code == 403
+
+
+def test_overlapping_groups_only_invite_each_member_once(client, monkeypatch):
+    import services
+
+    shared_user_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "shared-member",
+            "displayName": "Shared Member",
+            "email": "shared-member@example.com",
+            "password": "SharedMemberPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert shared_user_response.status_code == 201
+    shared_user = shared_user_response.get_json()["user"]
+
+    groups = []
+    for name in ("重叠组一", "重叠组二"):
+        group = client.post("/api/groups", json={"name": name}).get_json()["group"]
+        add_response = client.post(
+            f"/api/groups/{group['id']}/members",
+            json={"userId": shared_user["id"], "groupRole": "member"},
+        )
+        assert add_response.status_code == 201
+        groups.append(group)
+
+    deliveries = []
+
+    def record_notification(meeting, recipients, **kwargs):
+        deliveries.append(list(recipients))
+        return {
+            "status": "sent",
+            "requested": len(recipients),
+            "sent": len(recipients),
+        }
+
+    monkeypatch.setattr(services, "send_meeting_invitation_notifications", record_notification)
+    response = client.post(
+        "/api/meetings",
+        json={
+            "title": "两个重叠用户组会议",
+            "hostName": "Admin",
+            "attendees": [group["selectionValue"] for group in groups],
+        },
+    )
+
+    assert response.status_code == 201
+    meeting = response.get_json()
+    assert meeting["attendees"] == ["admin@example.com", "shared-member@example.com"]
+    assert len(meeting["attendees"]) == len(set(meeting["attendees"]))
+    assert deliveries == [["admin@example.com", "shared-member@example.com"]]
+    assert meeting["emailNotification"] == {"status": "sent", "requested": 2, "sent": 2}
 
 
 def test_registration_requires_admin_approval(anonymous_client):
@@ -229,6 +528,7 @@ def test_admin_can_manage_users_and_reset_password(client):
             "username": "mike",
             "displayName": "Mike",
             "email": "mike@example.com",
+            "jobTitle": "项目专员",
             "password": "MikePass123",
             "role": "scheduler",
             "status": "active",
@@ -237,13 +537,20 @@ def test_admin_can_manage_users_and_reset_password(client):
 
     assert create_response.status_code == 201
     created = create_response.get_json()["user"]
+    assert created["jobTitle"] == "项目专员"
 
     update_response = client.patch(
         f"/api/admin/users/{created['id']}",
-        json={"displayName": "Mike Chen", "role": "scheduler", "status": "active"},
+        json={
+            "displayName": "Mike Chen",
+            "jobTitle": "高级项目经理",
+            "role": "scheduler",
+            "status": "active",
+        },
     )
     assert update_response.status_code == 200
     assert update_response.get_json()["user"]["displayName"] == "Mike Chen"
+    assert update_response.get_json()["user"]["jobTitle"] == "高级项目经理"
 
     reset_response = client.post(f"/api/admin/users/{created['id']}/reset-password")
     assert reset_response.status_code == 200
@@ -354,12 +661,110 @@ def test_password_reset_request_accepts_email(client):
     assert login_response.get_json()["user"]["username"] == "olivia"
 
 
+def test_email_password_reset_sends_single_use_link_and_revokes_sessions(client, monkeypatch):
+    create_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "rachel",
+            "displayName": "Rachel",
+            "email": "rachel@example.com",
+            "password": "RachelPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert create_response.status_code == 201
+
+    import auth
+
+    deliveries = []
+
+    def fake_send_password_reset_email(recipient, display_name, reset_url, expires_minutes):
+        deliveries.append((recipient, display_name, reset_url, expires_minutes))
+        return {"status": "sent", "requested": 1, "sent": 1}
+
+    monkeypatch.setattr(auth, "send_password_reset_email", fake_send_password_reset_email)
+
+    client.post("/api/auth/logout")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"account": "rachel@example.com", "password": "RachelPass123"},
+    )
+    assert login_response.status_code == 200
+
+    request_response = client.post(
+        "/api/auth/email-password-reset",
+        json={"email": "rachel@example.com"},
+    )
+    assert request_response.status_code == 202
+    generic_message = request_response.get_json()["message"]
+    assert "如果该邮箱与有效账号匹配" in generic_message
+    assert len(deliveries) == 1
+    recipient, display_name, reset_url, expires_minutes = deliveries[0]
+    assert recipient == "rachel@example.com"
+    assert display_name == "Rachel"
+    assert expires_minutes == 30
+    raw_token = reset_url.split("resetToken=", 1)[1]
+
+    from database import get_connection
+
+    with get_connection() as conn:
+        token_row = conn.execute(
+            "SELECT token_hash, used_at FROM password_reset_tokens"
+        ).fetchone()
+    assert token_row["token_hash"] == auth.token_hash(raw_token)
+    assert token_row["token_hash"] != raw_token
+    assert token_row["used_at"] is None
+
+    unknown_response = client.post(
+        "/api/auth/email-password-reset",
+        json={"email": "unknown@example.com"},
+    )
+    assert unknown_response.status_code == 202
+    assert unknown_response.get_json()["message"] == generic_message
+    assert len(deliveries) == 1
+
+    reset_response = client.post(
+        "/api/auth/reset-password",
+        json={
+            "token": raw_token,
+            "newPassword": "RachelNewPass456",
+            "confirmPassword": "RachelNewPass456",
+        },
+    )
+    assert reset_response.status_code == 200
+    assert client.get("/api/auth/me").status_code == 401
+
+    old_login = client.post(
+        "/api/auth/login",
+        json={"account": "rachel@example.com", "password": "RachelPass123"},
+    )
+    assert old_login.status_code == 401
+    new_login = client.post(
+        "/api/auth/login",
+        json={"account": "rachel@example.com", "password": "RachelNewPass456"},
+    )
+    assert new_login.status_code == 200
+
+    reused_response = client.post(
+        "/api/auth/reset-password",
+        json={
+            "token": raw_token,
+            "newPassword": "AnotherPass789",
+            "confirmPassword": "AnotherPass789",
+        },
+    )
+    assert reused_response.status_code == 400
+    assert reused_response.get_json()["message"] == "重置链接无效或已过期"
+
+
 def test_create_meeting_returns_password_once(client):
     response = client.post(
         "/api/meetings",
         json={
             "title": "周会",
             "hostName": "William",
+            "passwordRequired": True,
             "maxOccupants": 12,
             "attendees": ["Alice", "Bob", "alice"],
         },
@@ -378,6 +783,27 @@ def test_create_meeting_returns_password_once(client):
     assert "password" not in detail
     assert detail["attendees"] == ["Alice", "Bob"]
     assert "lobbyEnabled" not in detail
+
+
+def test_create_meeting_defaults_to_no_password(client):
+    response = client.post(
+        "/api/meetings",
+        json={"title": "默认无密码会议", "hostName": "Admin"},
+    )
+
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["passwordRequired"] is False
+    assert "password" not in created
+    assert created["attendees"] == ["admin@example.com"]
+    assert created["jitsiUrl"] == created["meetingUrl"]
+    assert created["meetingUrl"].startswith("https://meet.wusupower.com/")
+
+    explicitly_empty = client.post(
+        "/api/meetings",
+        json={"title": "主动移除自己", "hostName": "Admin", "attendees": []},
+    ).get_json()
+    assert explicitly_empty["attendees"] == []
 
 
 def test_create_meeting_notifies_email_attendees_and_registered_users(client, monkeypatch):
@@ -407,6 +833,7 @@ def test_create_meeting_notifies_email_attendees_and_registered_users(client, mo
         json={
             "title": "邮件通知测试",
             "hostName": "Admin",
+            "passwordRequired": True,
             "attendees": ["external@example.com", "Alice Chen", "无法识别的姓名"],
         },
     )
@@ -418,6 +845,68 @@ def test_create_meeting_notifies_email_attendees_and_registered_users(client, mo
     assert len(sent) == 1
     assert sent[0][1] == ["external@example.com", "alice@example.com"]
     assert sent[0][2]["password"] == created["password"]
+
+
+def test_user_can_disable_own_meeting_email_notifications(client, monkeypatch):
+    import services
+
+    current_user = client.get("/api/auth/me").get_json()["user"]
+    assert current_user["emailNotificationsEnabled"] is True
+    assert current_user["customThemeColor"] is None
+
+    invalid_color_response = client.patch(
+        "/api/auth/preferences",
+        json={"customThemeColor": "blue"},
+    )
+    assert invalid_color_response.status_code == 400
+    assert invalid_color_response.get_json()["message"] == "自定义颜色格式应为 #xxxxxx"
+
+    color_response = client.patch(
+        "/api/auth/preferences",
+        json={"customThemeColor": "#12AbEf"},
+    )
+    assert color_response.status_code == 200
+    assert color_response.get_json()["user"]["customThemeColor"] == "#12abef"
+    assert client.get("/api/auth/me").get_json()["user"]["customThemeColor"] == "#12abef"
+
+    preference_response = client.patch(
+        "/api/auth/preferences",
+        json={"emailNotificationsEnabled": False},
+    )
+    assert preference_response.status_code == 200
+    assert preference_response.get_json()["user"]["emailNotificationsEnabled"] is False
+    assert client.get("/api/auth/me").get_json()["user"]["emailNotificationsEnabled"] is False
+
+    deliveries = []
+
+    def record_notification(meeting, recipients, **kwargs):
+        deliveries.append(list(recipients))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    monkeypatch.setattr(services, "send_meeting_invitation_notifications", record_notification)
+    response = client.post(
+        "/api/meetings",
+        json={
+            "title": "邮件首选项测试",
+            "hostName": "Admin",
+            "attendees": ["admin@example.com", "external@example.com"],
+        },
+    )
+
+    assert response.status_code == 201
+    assert deliveries == [["external@example.com"]]
+    assert response.get_json()["emailNotification"] == {
+        "status": "sent",
+        "requested": 1,
+        "sent": 1,
+    }
+
+    clear_color_response = client.patch(
+        "/api/auth/preferences",
+        json={"customThemeColor": None},
+    )
+    assert clear_color_response.status_code == 200
+    assert clear_color_response.get_json()["user"]["customThemeColor"] is None
 
 
 def test_update_meeting_only_notifies_new_attendees(client, monkeypatch):
@@ -435,6 +924,7 @@ def test_update_meeting_only_notifies_new_attendees(client, monkeypatch):
         json={
             "title": "新增参会者测试",
             "hostName": "Admin",
+            "passwordRequired": True,
             "attendees": ["first@example.com"],
         },
     ).get_json()
@@ -449,6 +939,218 @@ def test_update_meeting_only_notifies_new_attendees(client, monkeypatch):
     assert len(sent) == 1
     assert sent[0][1] == ["second@example.com"]
     assert sent[0][2]["password"] == created["password"]
+
+
+def test_update_meeting_sends_update_removal_and_invitation_once(client, monkeypatch):
+    import services
+
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "变更通知测试",
+            "hostName": "原主持人",
+            "passwordRequired": False,
+            "attendees": ["stay@example.com", "remove@example.com"],
+            "startTime": "2048-01-01T09:00:00Z",
+            "endTime": "2048-01-01T10:00:00Z",
+        },
+    ).get_json()
+    deliveries = {"invitation": [], "update": [], "removal": []}
+
+    def record_invitation(meeting, recipients, **kwargs):
+        deliveries["invitation"].append((list(recipients), kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    def record_update(meeting, recipients, changes, **kwargs):
+        deliveries["update"].append((list(recipients), list(changes), kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    def record_removal(meeting, recipients, **kwargs):
+        deliveries["removal"].append((list(recipients), kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    monkeypatch.setattr(services, "send_meeting_invitation_notifications", record_invitation)
+    monkeypatch.setattr(services, "send_meeting_update_notifications", record_update)
+    monkeypatch.setattr(services, "send_meeting_removal_notifications", record_removal)
+
+    response = client.put(
+        f"/api/meetings/{created['id']}",
+        json={
+            "hostName": "新主持人",
+            "passwordRequired": True,
+            "attendees": ["stay@example.com", "STAY@example.com", "new@example.com"],
+            "startTime": "2048-01-01T11:00:00Z",
+            "endTime": "2048-01-01T12:30:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.get_json()
+    assert updated["changes"] == ["主持人", "会议时间", "会议链接"]
+    assert deliveries["invitation"] == [
+        (["new@example.com"], {"password": updated["password"], "recurrence_count": 1})
+    ]
+    assert deliveries["update"][0][0] == ["stay@example.com"]
+    assert deliveries["update"][0][1] == ["主持人", "会议时间", "会议链接"]
+    assert deliveries["update"][0][2]["scope"] == "single"
+    assert deliveries["update"][0][2]["password"] == updated["password"]
+    assert deliveries["removal"] == [(["remove@example.com"], {"scope": "single"})]
+    assert updated["emailNotification"] == {"status": "sent", "requested": 3, "sent": 3}
+
+    duplicate_response = client.put(
+        f"/api/meetings/{created['id']}",
+        json={
+            "hostName": "新主持人",
+            "passwordRequired": True,
+            "attendees": ["stay@example.com", "new@example.com"],
+            "startTime": "2048-01-01T11:00:00Z",
+            "endTime": "2048-01-01T12:30:00Z",
+        },
+    )
+    assert duplicate_response.status_code == 200
+    duplicate = duplicate_response.get_json()
+    assert duplicate["changes"] == []
+    assert duplicate["emailNotification"] == {
+        "status": "not_requested",
+        "requested": 0,
+        "sent": 0,
+    }
+    assert len(deliveries["invitation"]) == 1
+    assert len(deliveries["update"]) == 1
+    assert len(deliveries["removal"]) == 1
+
+
+def test_meeting_list_only_includes_meetings_where_current_user_is_an_attendee(client):
+    visible = client.post(
+        "/api/meetings",
+        json={
+            "title": "我参加的会议",
+            "hostName": "Someone Else",
+            "attendees": ["admin@example.com"],
+        },
+    ).get_json()
+    hidden = client.post(
+        "/api/meetings",
+        json={
+            "title": "仅由我创建但未参加",
+            "hostName": "Admin",
+            "attendees": ["someone@example.com"],
+        },
+    ).get_json()
+
+    assert hidden["mailOwner"] == "admin@example.com"
+    listed = client.get("/api/meetings").get_json()["items"]
+    assert [meeting["id"] for meeting in listed] == [visible["id"]]
+
+
+def test_personal_calendar_subscription_only_contains_attendee_meetings(client):
+    visible = client.post(
+        "/api/meetings",
+        json={
+            "title": "个人日历可见会议",
+            "hostName": "Admin",
+            "attendees": ["admin@example.com"],
+            "passwordRequired": True,
+            "startTime": "2048-05-01T09:00:00Z",
+            "endTime": "2048-05-01T10:00:00Z",
+        },
+    ).get_json()
+    client.post(
+        "/api/meetings",
+        json={
+            "title": "个人日历不可见会议",
+            "hostName": "Another Host",
+            "attendees": ["someone-else@example.com"],
+            "startTime": "2048-05-02T09:00:00Z",
+            "endTime": "2048-05-02T10:00:00Z",
+        },
+    )
+
+    subscription_response = client.post("/api/calendar/subscription")
+    assert subscription_response.status_code == 200
+    subscription = subscription_response.get_json()
+    assert subscription["subscriptionUrl"].startswith(
+        "http://localhost:5173/api/calendar/subscriptions/"
+    )
+    assert subscription["subscriptionUrl"].endswith(".ics")
+    assert subscription["webcalUrl"].startswith("webcal://localhost:5173/")
+    assert client.post("/api/calendar/subscription").get_json()["subscriptionUrl"] == subscription[
+        "subscriptionUrl"
+    ]
+
+    token = subscription["subscriptionUrl"].rsplit("/", 1)[1].removesuffix(".ics")
+    from database import get_connection
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT token_hash, token_encrypted FROM calendar_subscription_tokens"
+        ).fetchone()
+    assert token not in row["token_hash"]
+    assert token not in row["token_encrypted"]
+
+    client.post("/api/auth/logout")
+    feed_path = urlsplit(subscription["subscriptionUrl"]).path
+    feed_response = client.get(feed_path)
+    assert feed_response.status_code == 200
+    assert feed_response.content_type == "text/calendar; charset=utf-8"
+    feed = feed_response.get_data(as_text=True)
+    assert "BEGIN:VCALENDAR\r\n" in feed
+    assert f"UID:meeting-{visible['id']}@meeting-control-system" in feed
+    assert "SUMMARY:个人日历可见会议" in feed
+    assert "个人日历不可见会议" not in feed
+    assert "DTSTART:20480501T090000Z" in feed
+    assert visible["accessUrl"] in feed
+    assert visible["password"] not in feed
+    assert "END:VCALENDAR\r\n" in feed
+
+    assert client.get("/api/calendar/subscriptions/not-a-real-token.ics").status_code == 404
+
+
+def test_all_attendees_expands_to_every_active_user(client):
+    assert client.post(
+        "/api/admin/users",
+        json={
+            "username": "alice",
+            "displayName": "Alice",
+            "email": "alice@example.com",
+            "password": "AlicePass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    ).status_code == 201
+    assert client.post(
+        "/api/admin/users",
+        json={
+            "username": "disabled-user",
+            "displayName": "Disabled User",
+            "email": "disabled@example.com",
+            "password": "DisabledPass123",
+            "role": "scheduler",
+            "status": "disabled",
+        },
+    ).status_code == 201
+
+    response = client.post(
+        "/api/meetings",
+        json={
+            "title": "全员会议",
+            "hostName": "Admin",
+            "attendees": ["@all", "external@example.com", "ADMIN@example.com"],
+        },
+    )
+
+    assert response.status_code == 201
+    created = response.get_json()
+    assert set(created["attendees"]) == {
+        "admin@example.com",
+        "alice@example.com",
+        "external@example.com",
+    }
+    assert "@all" not in created["attendees"]
+    assert "disabled@example.com" not in created["attendees"]
+    assert [meeting["id"] for meeting in client.get("/api/meetings").get_json()["items"]] == [
+        created["id"]
+    ]
 
 
 def test_mailer_sends_invitation_through_configured_smtp(monkeypatch):
@@ -507,23 +1209,77 @@ def test_mailer_sends_invitation_through_configured_smtp(monkeypatch):
             "title": "项目例会",
             "hostName": "Admin",
             "mailOwner": "admin@example.com",
-            "startTime": "2048-01-01T09:00:00Z",
-            "endTime": "2048-01-01T10:00:00Z",
+            "startTime": "2026-08-07T00:00:00Z",
+            "endTime": "2026-08-07T02:00:00Z",
             "accessUrl": "https://meeting.example.com/join/example",
         },
         ["alice@example.com"],
         password="1234",
     )
+    reset_result = mailer.send_password_reset_email(
+        "alice@example.com",
+        "Alice",
+        "https://meeting.example.com/?resetToken=one-time-token",
+        30,
+    )
+    event_meeting = {
+        "title": "项目例会",
+        "hostName": "新主持人",
+        "mailOwner": "admin@example.com",
+        "startTime": "2026-08-07T01:00:00Z",
+        "endTime": "2026-08-07T02:30:00Z",
+        "accessUrl": "https://meeting.example.com/join/updated",
+    }
+    update_result = mailer.send_meeting_update_notifications(
+        event_meeting,
+        ["alice@example.com", "ALICE@example.com"],
+        ["会议时间", "主持人", "会议链接", "会议时间"],
+        scope="following",
+        password="5678",
+    )
+    cancellation_result = mailer.send_meeting_cancellation_notifications(
+        event_meeting,
+        ["bob@example.com"],
+        scope="single",
+    )
+    removal_result = mailer.send_meeting_removal_notifications(
+        event_meeting,
+        ["carol@example.com"],
+        scope="series",
+    )
 
     assert result == {"status": "sent", "requested": 1, "sent": 1}
+    assert reset_result == {"status": "sent", "requested": 1, "sent": 1}
+    assert update_result == {"status": "sent", "requested": 1, "sent": 1}
+    assert cancellation_result == {"status": "sent", "requested": 1, "sent": 1}
+    assert removal_result == {"status": "sent", "requested": 1, "sent": 1}
     assert ("connect", "smtp.example.com", 587, 10) in smtp_events
     assert ("starttls",) in smtp_events
     assert ("login", "mailer@example.com", "app-password") in smtp_events
-    assert len(sent_messages) == 1
+    assert len(sent_messages) == 5
     assert sent_messages[0]["To"] == "alice@example.com"
     assert sent_messages[0]["Reply-To"] == "admin@example.com"
     assert "项目例会" in sent_messages[0]["Subject"]
-    assert "会议密码：1234" in sent_messages[0].get_content()
+    invitation_content = sent_messages[0].get_content()
+    assert "会议时间：2026年08月07日8点" in invitation_content
+    assert "会议时长：2小时" in invitation_content
+    assert "会议链接：https://meeting.example.com/join/example" in invitation_content
+    assert "会议密码：1234" in invitation_content
+    assert "开始时间：" not in invitation_content
+    assert "结束时间：" not in invitation_content
+    assert sent_messages[1]["To"] == "alice@example.com"
+    assert "设置新密码" in sent_messages[1]["Subject"]
+    assert "resetToken=one-time-token" in sent_messages[1].get_content()
+    assert "30 分钟后失效" in sent_messages[1].get_content()
+    assert sent_messages[2]["Subject"] == "[会议更新] 项目例会"
+    assert "影响范围：本次及后续会议" in sent_messages[2].get_content()
+    assert "变更内容：会议时间、主持人、会议链接" in sent_messages[2].get_content()
+    assert "会议密码：5678" in sent_messages[2].get_content()
+    assert sent_messages[3]["Subject"] == "[会议取消] 项目例会"
+    assert "影响范围：仅本次会议" in sent_messages[3].get_content()
+    assert "会议链接：" not in sent_messages[3].get_content()
+    assert sent_messages[4]["Subject"] == "[参会移除] 项目例会"
+    assert "影响范围：整个会议系列" in sent_messages[4].get_content()
 
 
 def test_mailer_supports_ssl_with_explicitly_unverified_certificate(monkeypatch):
@@ -590,7 +1346,7 @@ def test_mailer_supports_ssl_with_explicitly_unverified_certificate(monkeypatch)
 def test_reservation_allocates_existing_room(client):
     created = client.post(
         "/api/meetings",
-        json={"title": "项目同步", "hostName": "Alice"},
+        json={"title": "项目同步", "hostName": "Alice", "passwordRequired": True},
     ).get_json()
 
     response = client.post(
@@ -611,19 +1367,24 @@ def test_reservation_allocates_existing_room(client):
     assert "lobby" not in payload
 
 
-def test_deleted_meeting_is_removed_and_rejected_by_reservation(client):
-    created = client.post("/api/meetings", json={"title": "删除测试", "hostName": "Bob"}).get_json()
+def test_cancelled_meeting_is_retained_and_rejected_by_reservation(client):
+    created = client.post("/api/meetings", json={"title": "取消测试", "hostName": "Bob"}).get_json()
 
     delete_response = client.delete(f"/api/meetings/{created['id']}")
     assert delete_response.status_code == 200
-    assert delete_response.get_json() == {"deleted": True, "id": created["id"]}
+    cancelled = delete_response.get_json()
+    assert cancelled["cancelled"] is True
+    assert cancelled["cancelledCount"] == 1
+    assert cancelled["ids"] == [created["id"]]
+    assert cancelled["status"] == "Cancelled"
 
     detail_response = client.get(f"/api/meetings/{created['id']}")
-    assert detail_response.status_code == 404
+    assert detail_response.status_code == 200
+    assert detail_response.get_json()["status"] == "Cancelled"
 
     response = client.post("/conference", data={"name": created["roomId"]})
     assert response.status_code == 403
-    assert response.get_json()["message"] == "会议不存在"
+    assert response.get_json()["message"] == "会议已取消"
 
 
 def test_create_meeting_uses_process_write_lock(client, monkeypatch):
@@ -653,6 +1414,7 @@ def test_meeting_status_is_derived_from_time_window(client):
         json={
             "title": "进行中状态测试",
             "hostName": "Alice",
+            "attendees": ["admin@example.com"],
             "startTime": "2020-01-01T09:00:00Z",
             "endTime": "2099-01-01T10:00:00Z",
         },
@@ -671,7 +1433,8 @@ def test_create_recurring_meeting_inserts_series(client):
         json={
             "title": "周期晨会",
             "hostName": "Nina",
-            "attendees": ["Alice", "Bob"],
+            "passwordRequired": True,
+            "attendees": ["Alice", "Bob", "admin@example.com"],
             "startTime": "2048-01-01T09:00:00Z",
             "endTime": "2048-01-01T10:30:00Z",
             "recurrence": {
@@ -707,11 +1470,141 @@ def test_create_recurring_meeting_inserts_series(client):
         "2048-01-07T09:00:00.000Z",
         "2048-01-10T09:00:00.000Z",
     ]
-    assert all(meeting["attendees"] == ["Alice", "Bob"] for meeting in series)
+    assert all(meeting["attendees"] == ["Alice", "Bob", "admin@example.com"] for meeting in series)
 
     listed = client.get("/api/meetings").get_json()["items"]
     assert len(listed) == 4
     assert {meeting["seriesId"] for meeting in listed} == {created["seriesId"]}
+
+
+def test_recurring_meeting_supports_single_following_and_series_updates(client):
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "范围修改测试",
+            "hostName": "初始主持人",
+            "startTime": "2048-01-01T09:00:00Z",
+            "endTime": "2048-01-01T10:00:00Z",
+            "recurrence": {"enabled": True, "type": "every_n_days", "interval": 3, "count": 4},
+        },
+    ).get_json()
+    series_ids = [meeting["id"] for meeting in created["seriesMeetings"]]
+
+    single = client.put(
+        f"/api/meetings/{series_ids[1]}",
+        json={"hostName": "仅本次主持人"},
+    ).get_json()
+    assert single["updateScope"] == "single"
+    assert single["affectedIds"] == [series_ids[1]]
+    assert client.get(f"/api/meetings/{series_ids[0]}").get_json()["hostName"] == "初始主持人"
+    assert client.get(f"/api/meetings/{series_ids[1]}").get_json()["hostName"] == "仅本次主持人"
+
+    following = client.put(
+        f"/api/meetings/{series_ids[1]}?scope=following",
+        json={
+            "hostName": "后续主持人",
+            "startTime": "2048-01-05T09:00:00Z",
+            "endTime": "2048-01-05T10:00:00Z",
+        },
+    ).get_json()
+    assert following["updateScope"] == "following"
+    assert following["affectedIds"] == series_ids[1:]
+    assert [meeting["startTime"] for meeting in following["affectedMeetings"]] == [
+        "2048-01-05T09:00:00.000Z",
+        "2048-01-08T09:00:00.000Z",
+        "2048-01-11T09:00:00.000Z",
+    ]
+    assert client.get(f"/api/meetings/{series_ids[0]}").get_json()["startTime"] == (
+        "2048-01-01T09:00:00.000Z"
+    )
+
+    whole_series = client.put(
+        f"/api/meetings/{series_ids[2]}?scope=series",
+        json={"title": "整个系列新标题", "hostName": "系列主持人"},
+    ).get_json()
+    assert whole_series["updateScope"] == "series"
+    assert whole_series["affectedIds"] == series_ids
+    assert whole_series["affectedCount"] == 4
+    assert {
+        client.get(f"/api/meetings/{meeting_id}").get_json()["title"]
+        for meeting_id in series_ids
+    } == {"整个系列新标题"}
+
+
+def test_cancel_single_occurrence_is_idempotent_and_series_can_cancel_remaining(
+    client,
+    monkeypatch,
+):
+    import services
+
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "单次取消测试",
+            "hostName": "Admin",
+            "attendees": ["member@example.com", "MEMBER@example.com"],
+            "startTime": "2048-02-01T09:00:00Z",
+            "endTime": "2048-02-01T10:00:00Z",
+            "recurrence": {"enabled": True, "type": "weekly", "count": 3},
+        },
+    ).get_json()
+    series_ids = [meeting["id"] for meeting in created["seriesMeetings"]]
+    deliveries = []
+
+    def record_cancellation(meeting, recipients, **kwargs):
+        deliveries.append((list(recipients), kwargs))
+        return {"status": "sent", "requested": len(recipients), "sent": len(recipients)}
+
+    monkeypatch.setattr(services, "send_meeting_cancellation_notifications", record_cancellation)
+
+    cancelled_once = client.delete(f"/api/meetings/{series_ids[1]}").get_json()
+    assert cancelled_once["cancelledCount"] == 1
+    assert cancelled_once["ids"] == [series_ids[1]]
+    assert deliveries == [(["member@example.com"], {"scope": "single"})]
+    assert [
+        client.get(f"/api/meetings/{meeting_id}").get_json()["status"]
+        for meeting_id in series_ids
+    ] == ["Scheduled", "Cancelled", "Scheduled"]
+
+    duplicate_cancel = client.delete(f"/api/meetings/{series_ids[1]}").get_json()
+    assert duplicate_cancel["alreadyCancelled"] is True
+    assert duplicate_cancel["cancelledCount"] == 0
+    assert duplicate_cancel["emailNotification"]["requested"] == 0
+    assert len(deliveries) == 1
+
+    cancelled_series = client.delete(
+        f"/api/meetings/{series_ids[1]}?scope=series"
+    ).get_json()
+    assert cancelled_series["cancelledCount"] == 2
+    assert cancelled_series["ids"] == [series_ids[0], series_ids[2]]
+    assert deliveries[-1] == (["member@example.com"], {"scope": "series"})
+    assert {
+        client.get(f"/api/meetings/{meeting_id}").get_json()["status"]
+        for meeting_id in series_ids
+    } == {"Cancelled"}
+
+
+def test_cancel_recurring_meeting_from_selected_occurrence_forward(client):
+    created = client.post(
+        "/api/meetings",
+        json={
+            "title": "后续取消测试",
+            "hostName": "Admin",
+            "startTime": "2048-03-01T09:00:00Z",
+            "endTime": "2048-03-01T10:00:00Z",
+            "recurrence": {"enabled": True, "type": "weekly", "count": 3},
+        },
+    ).get_json()
+    series_ids = [meeting["id"] for meeting in created["seriesMeetings"]]
+
+    response = client.delete(f"/api/meetings/{series_ids[1]}?scope=following")
+
+    assert response.status_code == 200
+    assert response.get_json()["ids"] == series_ids[1:]
+    assert [
+        client.get(f"/api/meetings/{meeting_id}").get_json()["status"]
+        for meeting_id in series_ids
+    ] == ["Scheduled", "Cancelled", "Cancelled"]
 
 
 def test_shared_recurring_url_resolves_to_next_available_occurrence(client):
@@ -746,7 +1639,7 @@ def test_shared_recurring_url_resolves_to_next_available_occurrence(client):
     assert detail["startTime"] == second["startTime"]
 
 
-def test_delete_recurring_series_removes_all_meetings(client):
+def test_cancel_recurring_series_retains_cancelled_occurrences(client):
     created = client.post(
         "/api/meetings",
         json={
@@ -767,13 +1660,17 @@ def test_delete_recurring_series_removes_all_meetings(client):
 
     assert delete_response.status_code == 200
     payload = delete_response.get_json()
-    assert payload["deleted"] is True
-    assert payload["deletedCount"] == 3
+    assert payload["cancelled"] is True
+    assert payload["cancelledCount"] == 3
     assert payload["ids"] == series_ids
     assert payload["seriesId"] == created["seriesId"]
-    assert client.get("/api/meetings").get_json()["items"] == []
+    listed = client.get("/api/meetings").get_json()["items"]
+    assert {meeting["id"] for meeting in listed} == set(series_ids)
+    assert {meeting["status"] for meeting in listed} == {"Cancelled"}
     for meeting_id in series_ids:
-        assert client.get(f"/api/meetings/{meeting_id}").status_code == 404
+        detail_response = client.get(f"/api/meetings/{meeting_id}")
+        assert detail_response.status_code == 200
+        assert detail_response.get_json()["status"] == "Cancelled"
 
 
 def test_init_db_migrates_existing_meetings_table(tmp_path, monkeypatch):
@@ -834,6 +1731,34 @@ def test_init_db_migrates_existing_meetings_table(tmp_path, monkeypatch):
     assert {"series_id", "recurrence_type", "recurrence_interval", "recurrence_count", "recurrence_index"} <= columns
     assert "idx_meetings_series_id" in indexes
     assert unique_room_id_indexes == []
+
+
+def test_process_write_lock_supports_windows_locking_api(tmp_path, monkeypatch):
+    import database
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def locking(self, file_descriptor, mode, byte_count):
+            self.calls.append((file_descriptor, mode, byte_count))
+
+    fake_msvcrt = FakeMsvcrt()
+    lock_path = tmp_path / "windows-compatible.lock"
+    monkeypatch.setattr(database, "_fcntl", None)
+    monkeypatch.setattr(database, "_msvcrt", fake_msvcrt)
+    monkeypatch.setattr(database, "database_lock_path", lambda: lock_path)
+
+    with database.process_write_lock():
+        assert lock_path.exists()
+
+    assert [call[1:] for call in fake_msvcrt.calls] == [
+        (fake_msvcrt.LK_LOCK, 1),
+        (fake_msvcrt.LK_UNLCK, 1),
+    ]
 
 
 def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, monkeypatch):
@@ -907,7 +1832,7 @@ def test_create_meeting_supports_legacy_required_recurrence_interval(tmp_path, m
     }
 
 
-def test_access_url_uses_bookmeeting_origin_by_default(tmp_path, monkeypatch):
+def test_public_urls_use_localhost_origin_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "meetings.sqlite3"))
     monkeypatch.setenv("PASSWORD_SECRET", "test-secret")
     monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
@@ -921,12 +1846,20 @@ def test_access_url_uses_bookmeeting_origin_by_default(tmp_path, monkeypatch):
     app.config.update(TESTING=True)
     with app.test_client() as test_client:
         create_logged_in_admin(test_client)
-        response = test_client.post("/api/meetings", json={"title": "默认域名", "hostName": "Alice"})
+        response = test_client.post(
+            "/api/meetings",
+            json={"title": "默认域名", "hostName": "Alice", "passwordRequired": True},
+        )
+        subscription_response = test_client.post("/api/calendar/subscription")
 
     assert response.status_code == 201
     created = response.get_json()
-    assert created["accessUrl"].startswith("http://bookmeeting.wusupower.com/join/")
+    assert created["accessUrl"].startswith("http://localhost:5173/join/")
     assert created["meetingUrl"] == created["accessUrl"]
+    assert subscription_response.status_code == 200
+    assert subscription_response.get_json()["subscriptionUrl"].startswith(
+        "http://localhost:5173/api/calendar/subscriptions/"
+    )
 
 
 def test_cors_allows_multiple_frontend_origins(tmp_path, monkeypatch):

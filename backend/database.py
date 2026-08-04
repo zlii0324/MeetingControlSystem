@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Generator, Iterable
+from typing import Any, BinaryIO, Generator, Iterable
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # Linux and macOS
+    _msvcrt = None
 
 from config import config
 
@@ -51,7 +60,7 @@ MEETING_COLUMN_DEFAULTS = {
     "end_time": "'1970-01-01T00:00:00.000Z'",
     "duration_seconds": "0",
     "status": "'Scheduled'",
-    "password_required": "1",
+    "password_required": "0",
     "password_hash": "''",
     "password_encrypted": "''",
     "max_occupants": "30",
@@ -91,7 +100,7 @@ def _create_meetings_table_sql(table_name: str = "meetings") -> str:
         status TEXT NOT NULL CHECK (
             status IN ('Scheduled', 'Running', 'Finished', 'Cancelled')
         ),
-        password_required INTEGER NOT NULL DEFAULT 1,
+        password_required INTEGER NOT NULL DEFAULT 0,
         password_hash TEXT NOT NULL,
         password_encrypted TEXT NOT NULL,
         max_occupants INTEGER NOT NULL DEFAULT 30,
@@ -133,6 +142,36 @@ def database_lock_path() -> Path:
     return Path(f"{config.database_path}.lock")
 
 
+def _acquire_file_lock(lock_file: BinaryIO) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+        return
+
+    if _msvcrt is not None:
+        lock_file.seek(0, 2)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+        return
+
+    raise RuntimeError("当前操作系统不支持进程文件锁")
+
+
+def _release_file_lock(lock_file: BinaryIO) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+        return
+
+    if _msvcrt is not None:
+        lock_file.seek(0)
+        _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+        return
+
+    raise RuntimeError("当前操作系统不支持进程文件锁")
+
+
 @contextmanager
 def process_write_lock() -> Generator[None, None, None]:
     depth = getattr(_WRITE_LOCK_STATE, "depth", 0)
@@ -147,14 +186,14 @@ def process_write_lock() -> Generator[None, None, None]:
     lock_path = database_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _WRITE_LOCK_MUTEX:
-        with lock_path.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        with lock_path.open("a+b") as lock_file:
+            _acquire_file_lock(lock_file)
             _WRITE_LOCK_STATE.depth = 1
             try:
                 yield
             finally:
                 _WRITE_LOCK_STATE.depth = 0
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _release_file_lock(lock_file)
 
 
 def _meeting_columns(conn: sqlite3.Connection) -> set[str]:
@@ -251,6 +290,9 @@ def _init_db_locked() -> None:
                 username TEXT NOT NULL UNIQUE,
                 display_name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
+                job_title TEXT NOT NULL DEFAULT '',
+                email_notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                custom_theme_color TEXT,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('admin', 'scheduler')),
                 status TEXT NOT NULL CHECK (
@@ -291,6 +333,48 @@ def _init_db_locked() -> None:
                 FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS calendar_subscription_tokens (
+                user_id INTEGER PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_encrypted TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS user_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_group_members (
+                group_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                member_role TEXT NOT NULL CHECK (member_role IN ('admin', 'member')),
+                added_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, user_id),
+                FOREIGN KEY (group_id) REFERENCES user_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
             CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
             CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
@@ -299,13 +383,23 @@ def _init_db_locked() -> None:
                 ON password_reset_requests(status);
             CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user_id
                 ON password_reset_requests(user_id);
+            CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+                ON password_reset_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
+                ON password_reset_tokens(expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_subscription_tokens_hash
+                ON calendar_subscription_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_user_group_members_user_id
+                ON user_group_members(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_group_members_group_id
+                ON user_group_members(group_id);
             """
         )
 
         columns = _meeting_columns(conn)
         if "password_required" not in columns:
             conn.execute(
-                "ALTER TABLE meetings ADD COLUMN password_required INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE meetings ADD COLUMN password_required INTEGER NOT NULL DEFAULT 0"
             )
             columns.add("password_required")
         recurrence_columns = {
@@ -322,6 +416,19 @@ def _init_db_locked() -> None:
 
         if _has_unique_room_id_constraint(conn):
             _recreate_meetings_without_unique_room_id(conn, columns)
+
+        user_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "email_notifications_enabled" not in user_columns:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN email_notifications_enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        if "job_title" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN job_title TEXT NOT NULL DEFAULT ''")
+        if "custom_theme_color" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN custom_theme_color TEXT")
 
         conn.executescript(
             """

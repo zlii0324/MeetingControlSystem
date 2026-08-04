@@ -11,13 +11,23 @@ from typing import Any
 from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
 from database import get_connection, process_write_lock
-from mailer import normalize_email_address, send_meeting_invitation_notifications
+from groups import resolve_group_attendee_emails
+from mailer import (
+    normalize_email_address,
+    send_meeting_cancellation_notifications,
+    send_meeting_invitation_notifications,
+    send_meeting_removal_notifications,
+    send_meeting_update_notifications,
+)
 
 
 STATUSES = {"Scheduled", "Running", "Finished", "Cancelled"}
 RECURRENCE_TYPES = {"weekly", "biweekly", "every_n_days", "monthly"}
 MAX_RECURRENCE_COUNT = 1000
 MAX_RECURRENCE_INTERVAL_DAYS = 365
+MAX_ATTENDEES = 500
+ALL_ATTENDEES_TOKEN = "@all"
+GROUP_ATTENDEES_PREFIX = "@group:"
 
 
 class MeetingError(Exception):
@@ -220,9 +230,78 @@ def normalize_attendees(value: Any) -> list[str]:
         seen.add(key)
         attendees.append(name)
 
-    if len(attendees) > 200:
-        raise MeetingError("参会者不能超过 200 人")
+    if len(attendees) > MAX_ATTENDEES:
+        raise MeetingError(f"参会者不能超过 {MAX_ATTENDEES} 人")
     return attendees
+
+
+def _expand_special_attendees(
+    conn: sqlite3.Connection,
+    attendees: list[str],
+    actor_user: dict[str, Any],
+) -> list[str]:
+    has_all_token = any(attendee.casefold() == ALL_ATTENDEES_TOKEN for attendee in attendees)
+    has_group_token = any(
+        attendee.casefold().startswith(GROUP_ATTENDEES_PREFIX) for attendee in attendees
+    )
+    if not has_all_token and not has_group_token:
+        return attendees
+
+    active_user_emails: list[str] = []
+    if has_all_token:
+        user_rows = conn.execute(
+            """
+            SELECT email
+              FROM users
+             WHERE status = 'active'
+             ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC
+            """
+        ).fetchall()
+        active_user_emails = [
+            email
+            for row in user_rows
+            if (email := normalize_email_address(row["email"])) is not None
+        ]
+
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for attendee in attendees:
+        normalized_attendee = attendee.casefold()
+        if normalized_attendee == ALL_ATTENDEES_TOKEN:
+            candidates = active_user_emails
+        elif normalized_attendee.startswith(GROUP_ATTENDEES_PREFIX):
+            try:
+                group_id = int(attendee.split(":", 1)[1])
+            except (IndexError, ValueError) as exc:
+                raise MeetingError("用户组选择无效") from exc
+            candidates = resolve_group_attendee_emails(conn, group_id, actor_user)
+        else:
+            candidates = [attendee]
+        for candidate in candidates:
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            expanded.append(candidate)
+
+    if len(expanded) > MAX_ATTENDEES:
+        raise MeetingError(f"参会者不能超过 {MAX_ATTENDEES} 人")
+    return expanded
+
+
+def _meeting_includes_user_as_attendee(meeting: dict[str, Any], user: dict[str, Any]) -> bool:
+    username = str(user.get("username") or "").strip().casefold()
+    identifiers = {
+        str(user.get("email") or "").strip().casefold(),
+        username,
+        f"@{username}" if username else "",
+        str(user.get("displayName") or user.get("display_name") or "").strip().casefold(),
+    }
+    identifiers.discard("")
+    return any(
+        str(attendee).strip().casefold() in identifiers
+        for attendee in meeting.get("attendees", [])
+    )
 
 
 def _resolve_attendee_email_addresses(
@@ -230,9 +309,10 @@ def _resolve_attendee_email_addresses(
     attendees: list[str],
 ) -> list[str]:
     identifier_emails: dict[str, set[str]] = {}
+    opted_out_emails: set[str] = set()
     user_rows = conn.execute(
         """
-        SELECT username, display_name, email
+        SELECT username, display_name, email, email_notifications_enabled
           FROM users
          WHERE status = 'active'
         """
@@ -240,6 +320,9 @@ def _resolve_attendee_email_addresses(
     for user in user_rows:
         email = normalize_email_address(user["email"])
         if email is None:
+            continue
+        if not bool(user["email_notifications_enabled"]):
+            opted_out_emails.add(email.casefold())
             continue
         identifiers = {
             str(user["username"] or "").strip().casefold(),
@@ -262,6 +345,8 @@ def _resolve_attendee_email_addresses(
         if len(candidates) != 1:
             continue
         email = next(iter(candidates))
+        if email.casefold() in opted_out_emails:
+            continue
         if email in seen:
             continue
         seen.add(email)
@@ -280,7 +365,7 @@ def access_url(room_id: str) -> str:
     return f"/join/{room_id}"
 
 
-def meeting_url(room_id: str, password_required: bool = True) -> str:
+def meeting_url(room_id: str, password_required: bool = False) -> str:
     if password_required:
         return access_url(room_id)
     return jitsi_url(room_id)
@@ -426,7 +511,7 @@ def _select_meeting_for_room(meetings: list[dict[str, Any]]) -> dict[str, Any] |
 
 
 @with_process_write_lock
-def list_meetings(status: str | None = None) -> list[dict[str, Any]]:
+def list_meetings(attendee_user: dict[str, Any], status: str | None = None) -> list[dict[str, Any]]:
     with get_connection() as conn:
         if status and status not in STATUSES:
             raise MeetingError("会议状态参数无效")
@@ -440,7 +525,11 @@ def list_meetings(status: str | None = None) -> list[dict[str, Any]]:
 
         meetings = [_attach_attendees(conn, _refresh_expired_status(conn, dict(row))) for row in rows]
         conn.commit()
-    public_meetings = [public_meeting(meeting) for meeting in meetings]
+    public_meetings = [
+        public_meeting(meeting)
+        for meeting in meetings
+        if _meeting_includes_user_as_attendee(meeting, attendee_user)
+    ]
     if status:
         return [meeting for meeting in public_meetings if meeting["status"] == status]
     return public_meetings
@@ -462,6 +551,7 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
 @with_process_write_lock
 def _create_meeting(
     payload: dict[str, Any],
+    actor_user: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], str | None, int]:
     title = str(payload.get("title", "")).strip()
     host_name = str(payload.get("hostName") or payload.get("host_name") or "").strip()
@@ -487,8 +577,11 @@ def _create_meeting(
     if max_occupants < 1 or max_occupants > 500:
         raise MeetingError("最大参会人数必须在 1 到 500 之间")
 
-    attendees = normalize_attendees(payload.get("attendees"))
-    password_required = parse_bool(payload_value(payload, "passwordRequired", "password_required"), True)
+    default_attendees = [actor_user["email"]] if actor_user.get("email") else []
+    attendees = normalize_attendees(
+        payload["attendees"] if "attendees" in payload else default_attendees
+    )
+    password_required = parse_bool(payload_value(payload, "passwordRequired", "password_required"), False)
     room_id = generate_room_id()
     password = generate_password() if password_required else None
     password_hash_value = hash_password(password) if password else ""
@@ -502,6 +595,7 @@ def _create_meeting(
 
     with get_connection() as conn:
         try:
+            attendees = _expand_special_attendees(conn, attendees, actor_user)
             while conn.execute("SELECT 1 FROM meetings WHERE room_id = ? LIMIT 1", (room_id,)).fetchone():
                 room_id = generate_room_id()
 
@@ -569,8 +663,11 @@ def _create_meeting(
     return response, notification_recipients, password, len(meetings)
 
 
-def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
-    response, notification_recipients, password, occurrence_count = _create_meeting(payload)
+def create_meeting(payload: dict[str, Any], actor_user: dict[str, Any]) -> dict[str, Any]:
+    response, notification_recipients, password, occurrence_count = _create_meeting(
+        payload,
+        actor_user,
+    )
     response["emailNotification"] = send_meeting_invitation_notifications(
         response,
         notification_recipients,
@@ -580,177 +677,416 @@ def create_meeting(payload: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+def _normalize_recurrence_scope(scope: str | None, action: str) -> str:
+    normalized_scope = str(scope or "single").strip().lower()
+    aliases = {"": "single", "meeting": "single", "one": "single", "future": "following"}
+    normalized_scope = aliases.get(normalized_scope, normalized_scope)
+    if normalized_scope not in {"single", "following", "series"}:
+        raise MeetingError(f"{action}范围无效")
+    return normalized_scope
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _combine_notification_results(*results: dict[str, Any]) -> dict[str, Any]:
+    requested = sum(int(result.get("requested", 0)) for result in results)
+    sent = sum(int(result.get("sent", 0)) for result in results)
+    if requested == 0:
+        status = "not_requested"
+    elif sent == requested:
+        status = "sent"
+    elif sent > 0:
+        status = "partial"
+    elif all(
+        result.get("status") in {"disabled", "not_requested"}
+        for result in results
+    ):
+        status = "disabled"
+    else:
+        status = "failed"
+    return {"status": status, "requested": requested, "sent": sent}
+
+
+def _not_requested_notification() -> dict[str, Any]:
+    return {"status": "not_requested", "requested": 0, "sent": 0}
+
+
+def _scope_meetings(
+    conn: sqlite3.Connection,
+    selected: dict[str, Any],
+    scope: str,
+) -> list[dict[str, Any]]:
+    if scope != "single" and not selected.get("series_id"):
+        raise MeetingError("非周期会议只能操作本次会议")
+    if scope == "single":
+        rows = [selected]
+    elif scope == "following":
+        query_rows = conn.execute(
+            """
+            SELECT * FROM meetings
+             WHERE series_id = ?
+               AND COALESCE(recurrence_index, 0) >= COALESCE(?, 0)
+             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
+            """,
+            (selected["series_id"], selected.get("recurrence_index")),
+        ).fetchall()
+        rows = [dict(row) for row in query_rows]
+    else:
+        query_rows = conn.execute(
+            """
+            SELECT * FROM meetings
+             WHERE series_id = ?
+             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
+            """,
+            (selected["series_id"],),
+        ).fetchall()
+        rows = [dict(row) for row in query_rows]
+
+    return [
+        _attach_attendees(conn, _refresh_expired_status(conn, dict(meeting)))
+        for meeting in rows
+    ]
+
+
+def _meeting_recipient_union(
+    conn: sqlite3.Connection,
+    meetings: list[dict[str, Any]],
+) -> list[str]:
+    return _ordered_unique(
+        [
+            email
+            for meeting in meetings
+            for email in _resolve_attendee_email_addresses(conn, meeting.get("attendees", []))
+        ]
+    )
+
+
 @with_process_write_lock
 def _update_meeting(
     meeting_id: int,
     payload: dict[str, Any],
-) -> tuple[dict[str, Any], list[str], str | None]:
+    actor_user: dict[str, Any],
+    scope: str | None = None,
+) -> tuple[dict[str, Any], dict[str, list[str]], list[str], str | None]:
+    normalized_scope = _normalize_recurrence_scope(scope, "修改")
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if row is None:
             raise MeetingError("会议不存在", 404)
 
-        meeting = _refresh_expired_status(conn, dict(row))
-        if meeting["status"] in {"Finished", "Cancelled"}:
+        selected = _attach_attendees(conn, _refresh_expired_status(conn, dict(row)))
+        if selected["status"] in {"Finished", "Cancelled"}:
             raise MeetingError("已结束或已取消的会议不能修改", 409)
+        target_meetings = [
+            meeting
+            for meeting in _scope_meetings(conn, selected, normalized_scope)
+            if meeting["status"] not in {"Finished", "Cancelled"}
+        ]
+        if not target_meetings:
+            raise MeetingError("没有可修改的会议", 409)
 
-        title = str(payload.get("title", meeting["title"])).strip()
-        host_name = str(payload.get("hostName") or payload.get("host_name") or meeting["host_name"]).strip()
-        mail_owner = payload.get("mailOwner", payload.get("mail_owner", meeting["mail_owner"]))
+        title = str(payload.get("title", selected["title"])).strip()
+        host_name = str(
+            payload.get("hostName") or payload.get("host_name") or selected["host_name"]
+        ).strip()
+        if not title:
+            raise MeetingError("会议标题不能为空")
+        if not host_name:
+            raise MeetingError("主持人不能为空")
+        mail_owner = payload.get("mailOwner", payload.get("mail_owner", selected["mail_owner"]))
         mail_owner = str(mail_owner).strip() if mail_owner else None
-        start_time = parse_datetime(payload.get("startTime") or payload.get("start_time"), "startTime")
-        end_time = parse_datetime(payload.get("endTime") or payload.get("end_time"), "endTime")
 
-        start_time = start_time or parse_datetime(meeting["start_time"], "startTime")
-        end_time = end_time or parse_datetime(meeting["end_time"], "endTime")
-        if start_time is None or end_time is None:
+        selected_start = parse_datetime(selected["start_time"], "startTime")
+        selected_end = parse_datetime(selected["end_time"], "endTime")
+        requested_start = parse_datetime(
+            payload.get("startTime") or payload.get("start_time"), "startTime"
+        ) or selected_start
+        requested_end = parse_datetime(
+            payload.get("endTime") or payload.get("end_time"), "endTime"
+        ) or selected_end
+        if not selected_start or not selected_end or not requested_start or not requested_end:
             raise MeetingError("会议时间无效")
-        if end_time <= start_time:
+        if requested_end <= requested_start:
             raise MeetingError("结束时间必须晚于开始时间")
+        start_delta = requested_start - selected_start
+        end_delta = requested_end - selected_end
 
         max_occupants = int(
-            payload_value(payload, "maxOccupants", "max_occupants", default=meeting["max_occupants"])
-            or meeting["max_occupants"]
+            payload_value(
+                payload,
+                "maxOccupants",
+                "max_occupants",
+                default=selected["max_occupants"],
+            )
+            or selected["max_occupants"]
         )
         if max_occupants < 1 or max_occupants > 500:
             raise MeetingError("最大参会人数必须在 1 到 500 之间")
 
         attendees_present = "attendees" in payload
         attendees = normalize_attendees(payload.get("attendees")) if attendees_present else []
-        previous_notification_recipients = (
-            _resolve_attendee_email_addresses(conn, _get_attendees(conn, meeting_id))
-            if attendees_present
-            else []
-        )
-        password_required = is_password_required(meeting)
-        new_password: str | None = None
-        password_hash_value = meeting["password_hash"]
-        password_encrypted_value = meeting["password_encrypted"]
-        if "passwordRequired" in payload or "password_required" in payload:
-            password_required = parse_bool(
+        if attendees_present:
+            attendees = _expand_special_attendees(conn, attendees, actor_user)
+        previous_notification_recipients = _meeting_recipient_union(conn, target_meetings)
+
+        password_setting_present = "passwordRequired" in payload or "password_required" in payload
+        password_required = (
+            parse_bool(
                 payload_value(payload, "passwordRequired", "password_required"),
-                password_required,
+                is_password_required(selected),
             )
-            if password_required and (
-                not is_password_required(meeting)
-                or not password_hash_value
-                or not password_encrypted_value
-            ):
-                new_password = generate_password()
-                password_hash_value = hash_password(new_password)
-                password_encrypted_value = encrypt_password(new_password, config.password_secret)
-            if not password_required:
+            if password_setting_present
+            else is_password_required(selected)
+        )
+        new_password: str | None = None
+        shared_password_hash: str | None = None
+        shared_password_encrypted: str | None = None
+        if password_setting_present and password_required and any(
+            not is_password_required(meeting)
+            or not meeting.get("password_hash")
+            or not meeting.get("password_encrypted")
+            for meeting in target_meetings
+        ):
+            new_password = generate_password()
+            shared_password_hash = hash_password(new_password)
+            shared_password_encrypted = encrypt_password(new_password, config.password_secret)
+
+        changes: list[str] = []
+        if any(meeting["title"] != title for meeting in target_meetings):
+            changes.append("会议名称")
+        if any(meeting["host_name"] != host_name for meeting in target_meetings):
+            changes.append("主持人")
+        if start_delta or end_delta:
+            changes.append("会议时间")
+        if password_setting_present and any(
+            is_password_required(meeting) != password_required for meeting in target_meetings
+        ):
+            changes.append("会议链接")
+
+        now = isoformat(utc_now())
+        for meeting in target_meetings:
+            original_start = parse_datetime(meeting["start_time"], "startTime")
+            original_end = parse_datetime(meeting["end_time"], "endTime")
+            if not original_start or not original_end:
+                raise MeetingError("会议时间无效")
+            updated_start = original_start + start_delta
+            updated_end = original_end + end_delta
+            if updated_end <= updated_start:
+                raise MeetingError("结束时间必须晚于开始时间")
+
+            target_password_required = password_required if password_setting_present else is_password_required(meeting)
+            if password_setting_present and not target_password_required:
                 password_hash_value = ""
                 password_encrypted_value = ""
-        duration_seconds = int((end_time - start_time).total_seconds())
-        now = isoformat(utc_now())
+            elif shared_password_hash and shared_password_encrypted:
+                password_hash_value = shared_password_hash
+                password_encrypted_value = shared_password_encrypted
+            else:
+                password_hash_value = meeting["password_hash"]
+                password_encrypted_value = meeting["password_encrypted"]
 
-        conn.execute(
-            """
-            UPDATE meetings
-               SET title = ?,
-                   host_name = ?,
-                   mail_owner = ?,
-                   start_time = ?,
-                   end_time = ?,
-                   duration_seconds = ?,
-                   password_required = ?,
-                   password_hash = ?,
-                   password_encrypted = ?,
-                   max_occupants = ?,
-                   updated_at = ?
-             WHERE id = ?
+            conn.execute(
+                """
+                UPDATE meetings
+                   SET title = ?, host_name = ?, mail_owner = ?, start_time = ?, end_time = ?,
+                       duration_seconds = ?, password_required = ?, password_hash = ?,
+                       password_encrypted = ?, max_occupants = ?, updated_at = ?
+                 WHERE id = ?
+                """,
+                (
+                    title,
+                    host_name,
+                    mail_owner,
+                    isoformat(updated_start),
+                    isoformat(updated_end),
+                    int((updated_end - updated_start).total_seconds()),
+                    1 if target_password_required else 0,
+                    password_hash_value,
+                    password_encrypted_value,
+                    max_occupants,
+                    now,
+                    meeting["id"],
+                ),
+            )
+            if attendees_present:
+                _replace_attendees(conn, meeting["id"], attendees)
+
+        affected_ids = [meeting["id"] for meeting in target_meetings]
+        placeholders = ",".join("?" for _ in affected_ids)
+        updated_rows = conn.execute(
+            f"""
+            SELECT * FROM meetings
+             WHERE id IN ({placeholders})
+             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
             """,
-            (
-                title,
-                host_name,
-                mail_owner,
-                isoformat(start_time),
-                isoformat(end_time),
-                duration_seconds,
-                1 if password_required else 0,
-                password_hash_value,
-                password_encrypted_value,
-                max_occupants,
-                now,
-                meeting_id,
-            ),
-        )
-        if attendees_present:
-            _replace_attendees(conn, meeting_id, attendees)
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        meeting = _attach_attendees(conn, dict(row))
-        current_notification_recipients = (
-            _resolve_attendee_email_addresses(conn, attendees) if attendees_present else []
-        )
+            tuple(affected_ids),
+        ).fetchall()
+        updated_meetings = [_attach_attendees(conn, dict(item)) for item in updated_rows]
+        updated_by_id = {meeting["id"]: meeting for meeting in updated_meetings}
+        selected_updated = updated_by_id[meeting_id]
+        current_notification_recipients = _meeting_recipient_union(conn, updated_meetings)
         conn.commit()
 
     previous_recipient_set = set(previous_notification_recipients)
-    newly_added_recipients = [
-        email
-        for email in current_notification_recipients
-        if email not in previous_recipient_set
-    ]
+    current_recipient_set = set(current_notification_recipients)
+    recipient_groups = {
+        "added": [email for email in current_notification_recipients if email not in previous_recipient_set],
+        "removed": [email for email in previous_notification_recipients if email not in current_recipient_set],
+        "retained": [email for email in current_notification_recipients if email in previous_recipient_set],
+    }
     notification_password = new_password
-    if newly_added_recipients and is_password_required(meeting) and not notification_password:
+    if (
+        (recipient_groups["added"] or (changes and recipient_groups["retained"]))
+        and is_password_required(selected_updated)
+        and not notification_password
+    ):
         try:
             notification_password = decrypt_password(
-                meeting["password_encrypted"],
+                selected_updated["password_encrypted"],
                 config.password_secret,
             )
         except Exception:
             notification_password = None
 
-    response = public_meeting(meeting, include_password=new_password)
-    return response, newly_added_recipients, notification_password
+    response = public_meeting(selected_updated, include_password=new_password)
+    response.update(
+        affectedIds=affected_ids,
+        affectedCount=len(affected_ids),
+        affectedMeetings=[public_meeting(meeting) for meeting in updated_meetings],
+        updateScope=normalized_scope,
+        changes=changes,
+    )
+    return response, recipient_groups, changes, notification_password
 
 
-def update_meeting(meeting_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    response, newly_added_recipients, notification_password = _update_meeting(meeting_id, payload)
-    response["emailNotification"] = send_meeting_invitation_notifications(
-        response,
-        newly_added_recipients,
-        password=notification_password,
+def update_meeting(
+    meeting_id: int,
+    payload: dict[str, Any],
+    actor_user: dict[str, Any],
+    scope: str | None = None,
+) -> dict[str, Any]:
+    response, recipient_groups, changes, notification_password = _update_meeting(
+        meeting_id,
+        payload,
+        actor_user,
+        scope,
+    )
+    invitation_result = (
+        send_meeting_invitation_notifications(
+            response,
+            recipient_groups["added"],
+            password=notification_password,
+            recurrence_count=response["affectedCount"],
+        )
+        if recipient_groups["added"]
+        else _not_requested_notification()
+    )
+    update_result = (
+        send_meeting_update_notifications(
+            response,
+            recipient_groups["retained"],
+            changes,
+            scope=response["updateScope"],
+            password=notification_password if "会议链接" in changes else None,
+        )
+        if changes and recipient_groups["retained"]
+        else _not_requested_notification()
+    )
+    removal_result = (
+        send_meeting_removal_notifications(
+            response,
+            recipient_groups["removed"],
+            scope=response["updateScope"],
+        )
+        if recipient_groups["removed"]
+        else _not_requested_notification()
+    )
+    response["emailNotifications"] = {
+        "invitation": invitation_result,
+        "update": update_result,
+        "removal": removal_result,
+    }
+    response["emailNotification"] = _combine_notification_results(
+        invitation_result,
+        update_result,
+        removal_result,
     )
     return response
 
 
 @with_process_write_lock
-def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
-    normalized_scope = str(scope or "single").strip().lower()
-    if normalized_scope in {"", "meeting", "one"}:
-        normalized_scope = "single"
-    if normalized_scope not in {"single", "series"}:
-        raise MeetingError("删除范围无效")
-
+def _cancel_meeting(
+    meeting_id: int,
+    scope: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    normalized_scope = _normalize_recurrence_scope(scope, "取消")
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if row is None:
             raise MeetingError("会议不存在", 404)
 
-        if normalized_scope == "series" and row["series_id"]:
-            rows = conn.execute(
-                """
-                SELECT id
-                  FROM meetings
-                 WHERE series_id = ?
+        selected = _attach_attendees(conn, _refresh_expired_status(conn, dict(row)))
+        scoped_meetings = _scope_meetings(conn, selected, normalized_scope)
+        target_meetings = [
+            meeting
+            for meeting in scoped_meetings
+            if meeting["status"] not in {"Finished", "Cancelled"}
+        ]
+        notification_recipients = _meeting_recipient_union(conn, target_meetings)
+        now = isoformat(utc_now())
+        target_ids = [meeting["id"] for meeting in target_meetings]
+        if target_ids:
+            placeholders = ",".join("?" for _ in target_ids)
+            conn.execute(
+                f"""
+                UPDATE meetings
+                   SET status = 'Cancelled', cancelled_at = ?, updated_at = ?
+                 WHERE id IN ({placeholders})
+                """,
+                (now, now, *target_ids),
+            )
+            updated_rows = conn.execute(
+                f"""
+                SELECT * FROM meetings
+                 WHERE id IN ({placeholders})
                  ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
                 """,
-                (row["series_id"],),
+                tuple(target_ids),
             ).fetchall()
-            meeting_ids = [item["id"] for item in rows]
-            conn.execute("DELETE FROM meetings WHERE series_id = ?", (row["series_id"],))
-            return {
-                "id": meeting_id,
-                "ids": meeting_ids,
-                "seriesId": row["series_id"],
-                "deleted": True,
-                "deletedCount": len(meeting_ids),
-            }
+            affected_meetings = [_attach_attendees(conn, dict(item)) for item in updated_rows]
+        else:
+            affected_meetings = []
+        selected_row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        selected_updated = _attach_attendees(conn, dict(selected_row))
+        conn.commit()
 
-        conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+    response = public_meeting(selected_updated)
+    response.update(
+        ids=target_ids,
+        seriesId=selected_updated.get("series_id"),
+        cancelled=True,
+        cancelledCount=len(target_ids),
+        cancellationScope=normalized_scope,
+        alreadyCancelled=not target_ids,
+        affectedMeetings=[public_meeting(meeting) for meeting in affected_meetings],
+    )
+    return response, notification_recipients
 
-    return {"id": meeting_id, "deleted": True}
+
+def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
+    response, notification_recipients = _cancel_meeting(meeting_id, scope)
+    response["emailNotification"] = (
+        send_meeting_cancellation_notifications(
+            response,
+            notification_recipients,
+            scope=response["cancellationScope"],
+        )
+        if notification_recipients
+        else _not_requested_notification()
+    )
+    return response
 
 
 @with_process_write_lock

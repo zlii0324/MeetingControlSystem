@@ -6,6 +6,12 @@ from functools import wraps
 from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
+from calendar_feed import (
+    CalendarFeedError,
+    build_personal_calendar,
+    ensure_calendar_subscription,
+)
+
 from auth import (
     AuthError,
     approve_password_reset_request,
@@ -21,14 +27,28 @@ from auth import (
     reject_password_reset_request,
     register_user,
     reject_user,
+    request_email_password_reset,
     request_password_reset,
+    reset_password_with_email_token,
     reset_user_password,
     search_user_directory,
     update_user as update_system_user,
+    update_own_preferences,
     change_own_password,
 )
 from config import config
 from database import init_db
+from groups import (
+    GroupError,
+    add_group_member,
+    create_group,
+    delete_group,
+    get_group,
+    list_groups,
+    remove_group_member,
+    update_group,
+    update_group_member,
+)
 from services import (
     MeetingError,
     allocate_conference,
@@ -92,6 +112,14 @@ def create_app() -> Flask:
     def handle_auth_error(error: AuthError):
         return jsonify({"message": str(error)}), error.status_code
 
+    @app.errorhandler(GroupError)
+    def handle_group_error(error: GroupError):
+        return jsonify({"message": str(error)}), error.status_code
+
+    @app.errorhandler(CalendarFeedError)
+    def handle_calendar_feed_error(error: CalendarFeedError):
+        return jsonify({"message": str(error)}), error.status_code
+
     @app.errorhandler(404)
     def handle_not_found(_error):
         return jsonify({"message": "接口不存在"}), 404
@@ -118,6 +146,16 @@ def create_app() -> Flask:
     def auth_password_reset_request():
         payload = request.get_json(silent=True) or {}
         return jsonify({"request": request_password_reset(payload)}), 201
+
+    @app.post("/api/auth/email-password-reset")
+    def auth_email_password_reset_request():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(request_email_password_reset(payload)), 202
+
+    @app.post("/api/auth/reset-password")
+    def auth_reset_password():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(reset_password_with_email_token(payload))
 
     @app.post("/api/auth/login")
     def auth_login():
@@ -155,6 +193,12 @@ def create_app() -> Flask:
     @login_required
     def auth_me():
         return jsonify({"user": g.current_user})
+
+    @app.patch("/api/auth/preferences")
+    @login_required
+    def auth_preferences_update():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": update_own_preferences(g.current_user["id"], payload)})
     
     @app.post("/api/auth/change-password")
     @login_required
@@ -175,6 +219,50 @@ def create_app() -> Flask:
     @login_required
     def users_directory():
         return jsonify({"items": search_user_directory(request.args.get("q"))})
+
+    @app.get("/api/groups")
+    @login_required
+    def groups_index():
+        return jsonify({"items": list_groups(g.current_user)})
+
+    @app.post("/api/groups")
+    @login_required
+    def groups_create():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"group": create_group(payload, g.current_user)}), 201
+
+    @app.get("/api/groups/<int:group_id>")
+    @login_required
+    def groups_show(group_id: int):
+        return jsonify({"group": get_group(group_id, g.current_user)})
+
+    @app.patch("/api/groups/<int:group_id>")
+    @login_required
+    def groups_update(group_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"group": update_group(group_id, payload, g.current_user)})
+
+    @app.delete("/api/groups/<int:group_id>")
+    @login_required
+    def groups_delete(group_id: int):
+        return jsonify(delete_group(group_id, g.current_user))
+
+    @app.post("/api/groups/<int:group_id>/members")
+    @login_required
+    def group_members_create(group_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"group": add_group_member(group_id, payload, g.current_user)}), 201
+
+    @app.patch("/api/groups/<int:group_id>/members/<int:user_id>")
+    @login_required
+    def group_members_update(group_id: int, user_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"group": update_group_member(group_id, user_id, payload, g.current_user)})
+
+    @app.delete("/api/groups/<int:group_id>/members/<int:user_id>")
+    @login_required
+    def group_members_delete(group_id: int, user_id: int):
+        return jsonify({"group": remove_group_member(group_id, user_id, g.current_user)})
 
     @app.get("/api/admin/users")
     @admin_required
@@ -237,14 +325,28 @@ def create_app() -> Flask:
     @app.get("/api/meetings")
     @login_required
     def meetings_index():
-        return jsonify({"items": list_meetings(request.args.get("status"))})
+        return jsonify({"items": list_meetings(g.current_user, request.args.get("status"))})
+
+    @app.post("/api/calendar/subscription")
+    @login_required
+    def calendar_subscription_create():
+        return jsonify(ensure_calendar_subscription(g.current_user))
+
+    @app.get("/api/calendar/subscriptions/<token>.ics")
+    def calendar_subscription_feed(token: str):
+        calendar_body, _calendar_name = build_personal_calendar(token)
+        response = app.response_class(calendar_body, content_type="text/calendar; charset=utf-8")
+        response.headers["Content-Disposition"] = 'inline; filename="personal-meetings.ics"'
+        response.headers["Cache-Control"] = "private, max-age=300"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.post("/api/meetings")
     @login_required
     def meetings_create():
         payload = request.get_json(silent=True) or {}
         payload.setdefault("mailOwner", g.current_user["email"])
-        return jsonify(create_meeting(payload)), 201
+        return jsonify(create_meeting(payload, g.current_user)), 201
 
     @app.get("/api/meetings/<int:meeting_id>")
     @login_required
@@ -255,7 +357,9 @@ def create_app() -> Flask:
     @login_required
     def meetings_update(meeting_id: int):
         payload = request.get_json(silent=True) or {}
-        return jsonify(update_meeting(meeting_id, payload))
+        return jsonify(
+            update_meeting(meeting_id, payload, g.current_user, request.args.get("scope"))
+        )
 
     @app.delete("/api/meetings/<int:meeting_id>")
     @login_required

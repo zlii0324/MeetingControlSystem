@@ -34,6 +34,7 @@ services:
       ROOM_PREFIX: mcs-test
       FRONTEND_ORIGIN: http://localhost:8080
       MEETING_LINK_ORIGIN: http://localhost:8080
+      PASSWORD_RESET_URL_ORIGIN: http://localhost:8080
       PASSWORD_SECRET: docker-test-only-secret-change-before-production
       DEFAULT_DURATION_HOURS: 24
       DEFAULT_MAX_OCCUPANTS: 30
