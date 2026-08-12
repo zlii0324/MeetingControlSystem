@@ -294,6 +294,7 @@ textarea {
   background: var(--surface);
   cursor: pointer;
   outline: none;
+  touch-action: pan-y;
   transition:
     background-color 0.16s ease,
     box-shadow 0.16s ease;
@@ -352,7 +353,8 @@ textarea {
   gap: 4px;
   min-height: 0;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: auto;
+  touch-action: pan-y;
   padding-right: 2px;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--accent) 58%, var(--surface)) transparent;
