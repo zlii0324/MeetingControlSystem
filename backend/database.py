@@ -291,6 +291,7 @@ def _init_db_locked() -> None:
                 display_name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
                 job_title TEXT NOT NULL DEFAULT '',
+                phone_number TEXT NOT NULL DEFAULT '',
                 email_notifications_enabled INTEGER NOT NULL DEFAULT 1,
                 custom_theme_color TEXT,
                 password_hash TEXT NOT NULL,
@@ -375,6 +376,29 @@ def _init_db_locked() -> None:
                 FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS milestones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                due_date TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('planned', 'in_progress', 'completed')
+                ),
+                is_global INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS milestone_related_users (
+                milestone_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (milestone_id, user_id),
+                FOREIGN KEY (milestone_id) REFERENCES milestones(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
             CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
             CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
@@ -393,6 +417,11 @@ def _init_db_locked() -> None:
                 ON user_group_members(user_id);
             CREATE INDEX IF NOT EXISTS idx_user_group_members_group_id
                 ON user_group_members(group_id);
+            CREATE INDEX IF NOT EXISTS idx_milestones_due_date ON milestones(due_date);
+            CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
+            CREATE INDEX IF NOT EXISTS idx_milestones_created_by ON milestones(created_by);
+            CREATE INDEX IF NOT EXISTS idx_milestone_related_users_user_id
+                ON milestone_related_users(user_id);
             """
         )
 
@@ -427,6 +456,8 @@ def _init_db_locked() -> None:
             )
         if "job_title" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN job_title TEXT NOT NULL DEFAULT ''")
+        if "phone_number" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN phone_number TEXT NOT NULL DEFAULT ''")
         if "custom_theme_color" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN custom_theme_color TEXT")
 

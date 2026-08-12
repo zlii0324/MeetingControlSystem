@@ -36,6 +36,7 @@ def create_admin(args: argparse.Namespace) -> int:
     display_name = args.display_name or prompt_required("用户昵称（真实姓名）", username)
     email = args.email or prompt_required("邮箱")
     job_title = args.job_title or ""
+    phone_number = args.phone_number or ""
     password = args.password or prompt_password()
 
     if args.if_not_exists:
@@ -63,6 +64,7 @@ def create_admin(args: argparse.Namespace) -> int:
             email=email,
             password=password,
             job_title=job_title,
+            phone_number=phone_number,
         )
     except AuthError as exc:
         print(f"创建失败：{exc}", file=sys.stderr)
@@ -109,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_admin_parser.add_argument("--display-name", help="用户昵称（真实姓名）；省略时交互输入")
     create_admin_parser.add_argument("--email", help="邮箱；省略时交互输入")
     create_admin_parser.add_argument("--job-title", help="职称；省略时留空")
+    create_admin_parser.add_argument("--phone-number", help="电话号码；省略时留空")
     create_admin_parser.add_argument("--password", help="密码；省略时安全交互输入")
     create_admin_parser.add_argument(
         "--if-not-exists",

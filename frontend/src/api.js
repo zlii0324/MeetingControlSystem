@@ -33,6 +33,13 @@ export function updateCurrentUserPreferences(values) {
   });
 }
 
+export function updateCurrentUserProfile(values) {
+  return request("/api/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify(values),
+  });
+}
+
 export function login(values) {
   return request("/api/auth/login", {
     method: "POST",
@@ -224,6 +231,30 @@ export function removeGroupMember(groupId, userId) {
 
 export function fetchMeetings() {
   return request("/api/meetings");
+}
+
+export function fetchMilestones() {
+  return request("/api/milestones");
+}
+
+export function createMilestone(values) {
+  return request("/api/milestones", {
+    method: "POST",
+    body: JSON.stringify(values),
+  });
+}
+
+export function updateMilestone(id, values) {
+  return request(`/api/milestones/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(values),
+  });
+}
+
+export function deleteMilestone(id) {
+  return request(`/api/milestones/${id}`, {
+    method: "DELETE",
+  });
 }
 
 export function createCalendarSubscription() {

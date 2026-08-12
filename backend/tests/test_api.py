@@ -22,6 +22,7 @@ APP_MODULES = [
     "groups",
     "services",
     "calendar_feed",
+    "milestones",
     "app",
 ]
 ADMIN_PASSWORD = "AdminPass123!"
@@ -95,6 +96,7 @@ def test_user_directory_searches_only_active_users(client):
             "displayName": "Olivia Chen",
             "email": "olivia@example.com",
             "jobTitle": "高级工程师",
+            "phoneNumber": "+61 400 000 101",
             "password": "OliviaPass123",
             "role": "scheduler",
             "status": "active",
@@ -104,6 +106,7 @@ def test_user_directory_searches_only_active_users(client):
             "displayName": "Oliver Li",
             "email": "oliver@example.com",
             "jobTitle": "产品经理",
+            "phoneNumber": "+61 400 000 102",
             "password": "OliverPass123",
             "role": "scheduler",
             "status": "active",
@@ -130,13 +133,90 @@ def test_user_directory_searches_only_active_users(client):
     assert {item["email"] for item in items} == {"olivia@example.com", "oliver@example.com"}
     assert {item["jobTitle"] for item in items} == {"高级工程师", "产品经理"}
     assert all(
-        set(item) == {"id", "username", "displayName", "email", "jobTitle"}
+        set(item) == {"id", "username", "displayName", "email", "jobTitle", "phoneNumber"}
         for item in items
     )
 
     title_response = client.get("/api/users/directory?q=产品经理")
     assert title_response.status_code == 200
     assert [item["username"] for item in title_response.get_json()["items"]] == ["oliver"]
+
+
+def test_regular_user_can_view_active_directory_sorted_by_name_pinyin(client):
+    users = [
+        ("zhangsan", "张三", "+61 400 000 103"),
+        ("lisi", "李四", "+61 400 000 101"),
+        ("wangwu", "王五", "+61 400 000 102"),
+    ]
+    for username, display_name, phone_number in users:
+        response = client.post(
+            "/api/admin/users",
+            json={
+                "username": username,
+                "displayName": display_name,
+                "email": f"{username}@example.com",
+                "jobTitle": "工程部",
+                "phoneNumber": phone_number,
+                "password": "DirectoryPass123",
+                "role": "scheduler",
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "lisi", "password": "DirectoryPass123"},
+    ).status_code == 200
+
+    response = client.get("/api/users/directory?q=工程部")
+
+    assert response.status_code == 200
+    directory = response.get_json()["items"]
+    assert [item["displayName"] for item in directory] == ["李四", "王五", "张三"]
+    assert [item["phoneNumber"] for item in directory] == [
+        "+61 400 000 101",
+        "+61 400 000 102",
+        "+61 400 000 103",
+    ]
+
+    phone_search = client.get("/api/users/directory?q=000%20102").get_json()["items"]
+    assert [item["displayName"] for item in phone_search] == ["王五"]
+
+
+def test_meeting_link_uses_pinyin_title_and_start_time(client):
+    response = client.post(
+        "/api/meetings",
+        json={
+            "title": "项目同步",
+            "hostName": "Alice",
+            "startTime": "2048-04-20T17:55:00Z",
+            "endTime": "2048-04-20T18:55:00Z",
+        },
+    )
+
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["roomId"] == "xiang-mu-tong-bu-20482004-17-55"
+    assert created["meetingUrl"] == (
+        "https://meet.wusupower.com/xiang-mu-tong-bu-20482004-17-55"
+    )
+
+
+def test_duplicate_meaningful_meeting_links_get_a_numeric_suffix(client):
+    payload = {
+        "title": "项目同步",
+        "hostName": "Alice",
+        "startTime": "2048-04-20T17:55:00Z",
+        "endTime": "2048-04-20T18:55:00Z",
+    }
+
+    first = client.post("/api/meetings", json=payload).get_json()
+    second = client.post("/api/meetings", json=payload).get_json()
+
+    assert first["roomId"] == "xiang-mu-tong-bu-20482004-17-55"
+    assert second["roomId"] == "xiang-mu-tong-bu-20482004-17-55-2"
 
 
 def test_user_group_visibility_and_member_permissions(client):
@@ -425,6 +505,7 @@ def test_registration_requires_admin_approval(anonymous_client):
             "username": "nina",
             "displayName": "Nina",
             "email": "nina@example.com",
+            "phoneNumber": "+61 400 555 010",
             "password": "NinaPass123",
             "registerMessage": "我是行政部 Nina，需要预约会议。",
         },
@@ -433,6 +514,7 @@ def test_registration_requires_admin_approval(anonymous_client):
     assert register_response.status_code == 201
     registered = register_response.get_json()["user"]
     assert registered["status"] == "pending"
+    assert registered["phoneNumber"] == "+61 400 555 010"
     assert registered["registerMessage"] == "我是行政部 Nina，需要预约会议。"
 
     pending_login = anonymous_client.post(
@@ -511,6 +593,7 @@ def test_user_password_is_stored_as_hash(anonymous_client):
     )
 
     assert response.status_code == 201
+    assert response.get_json()["user"]["phoneNumber"] == ""
 
     from database import get_connection
 
@@ -529,6 +612,7 @@ def test_admin_can_manage_users_and_reset_password(client):
             "displayName": "Mike",
             "email": "mike@example.com",
             "jobTitle": "项目专员",
+            "phoneNumber": "+61 400 123 456",
             "password": "MikePass123",
             "role": "scheduler",
             "status": "active",
@@ -538,12 +622,14 @@ def test_admin_can_manage_users_and_reset_password(client):
     assert create_response.status_code == 201
     created = create_response.get_json()["user"]
     assert created["jobTitle"] == "项目专员"
+    assert created["phoneNumber"] == "+61 400 123 456"
 
     update_response = client.patch(
         f"/api/admin/users/{created['id']}",
         json={
             "displayName": "Mike Chen",
             "jobTitle": "高级项目经理",
+            "phoneNumber": "+61 400 654 321",
             "role": "scheduler",
             "status": "active",
         },
@@ -551,6 +637,7 @@ def test_admin_can_manage_users_and_reset_password(client):
     assert update_response.status_code == 200
     assert update_response.get_json()["user"]["displayName"] == "Mike Chen"
     assert update_response.get_json()["user"]["jobTitle"] == "高级项目经理"
+    assert update_response.get_json()["user"]["phoneNumber"] == "+61 400 654 321"
 
     reset_response = client.post(f"/api/admin/users/{created['id']}/reset-password")
     assert reset_response.status_code == 200
@@ -907,6 +994,54 @@ def test_user_can_disable_own_meeting_email_notifications(client, monkeypatch):
     )
     assert clear_color_response.status_code == 200
     assert clear_color_response.get_json()["user"]["customThemeColor"] is None
+
+
+def test_regular_user_can_update_own_profile_without_admin_access(client):
+    for username, email in (("alice-profile", "alice-profile@example.com"), ("bob-profile", "bob-profile@example.com")):
+        response = client.post(
+            "/api/admin/users",
+            json={
+                "username": username,
+                "displayName": username,
+                "email": email,
+                "phoneNumber": "+86",
+                "password": "ProfilePass123",
+                "role": "scheduler",
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice-profile", "password": "ProfilePass123"},
+    ).status_code == 200
+
+    update_response = client.patch(
+        "/api/auth/profile",
+        json={
+            "displayName": "Alice Zhang",
+            "phoneNumber": "+86 138 0013 8000",
+            "email": "alice.zhang@example.com",
+            "role": "admin",
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated = update_response.get_json()["user"]
+    assert updated["displayName"] == "Alice Zhang"
+    assert updated["phoneNumber"] == "+86 138 0013 8000"
+    assert updated["email"] == "alice.zhang@example.com"
+    assert updated["role"] == "scheduler"
+    assert client.get("/api/admin/users").status_code == 403
+
+    duplicate_email_response = client.patch(
+        "/api/auth/profile",
+        json={"email": "bob-profile@example.com"},
+    )
+    assert duplicate_email_response.status_code == 409
+    assert duplicate_email_response.get_json()["message"] == "邮箱已被使用"
 
 
 def test_update_meeting_only_notifies_new_attendees(client, monkeypatch):
@@ -1877,3 +2012,115 @@ def test_cors_allows_multiple_frontend_origins(tmp_path, monkeypatch):
         for origin in ["http://127.0.0.1:5173", "http://localhost:5173"]:
             response = test_client.get("/api/health", headers={"Origin": origin})
             assert response.headers["Access-Control-Allow-Origin"] == origin
+
+
+def test_milestones_are_filtered_by_related_user_creator_and_global_scope(client):
+    created_users = {}
+    for username in ("bob", "charlie"):
+        response = client.post(
+            "/api/admin/users",
+            json={
+                "username": username,
+                "displayName": username.title(),
+                "email": f"{username}@example.com",
+                "password": f"{username.title()}Pass123",
+                "role": "scheduler",
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201
+        created_users[username] = response.get_json()["user"]
+
+    current_user = client.get("/api/auth/me").get_json()["user"]
+    default_response = client.post(
+        "/api/milestones",
+        json={"title": "管理员私有节点", "dueDate": "2048-06-01"},
+    )
+    assert default_response.status_code == 201
+    default_milestone = default_response.get_json()["milestone"]
+    assert default_milestone["status"] == "planned"
+    assert default_milestone["isGlobal"] is False
+    assert [user["id"] for user in default_milestone["relatedUsers"]] == [current_user["id"]]
+
+    assigned_response = client.post(
+        "/api/milestones",
+        json={
+            "title": "Bob 相关节点",
+            "description": "只分配给 Bob",
+            "dueDate": "2048-06-02",
+            "status": "in_progress",
+            "relatedUserIds": [created_users["bob"]["id"]],
+        },
+    )
+    assert assigned_response.status_code == 201
+    assigned_milestone = assigned_response.get_json()["milestone"]
+
+    global_response = client.post(
+        "/api/milestones",
+        json={
+            "title": "全局发布节点",
+            "dueDate": "2048-06-03",
+            "isGlobal": True,
+            "relatedUserIds": [999999],
+        },
+    )
+    assert global_response.status_code == 201
+    global_milestone = global_response.get_json()["milestone"]
+    assert global_milestone["relatedUsers"] == []
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "bob", "password": "BobPass123"},
+    ).status_code == 200
+
+    bob_items = client.get("/api/milestones").get_json()["items"]
+    assert {item["id"] for item in bob_items} == {
+        assigned_milestone["id"],
+        global_milestone["id"],
+    }
+    assert next(item for item in bob_items if item["id"] == assigned_milestone["id"])["canEdit"] is False
+    assert client.patch(
+        f"/api/milestones/{assigned_milestone['id']}",
+        json={"status": "completed"},
+    ).status_code == 403
+
+    bob_owned_response = client.post(
+        "/api/milestones",
+        json={
+            "title": "Bob 创建但分配给 Charlie",
+            "dueDate": "2048-06-04",
+            "relatedUserIds": [created_users["charlie"]["id"]],
+        },
+    )
+    assert bob_owned_response.status_code == 201
+    bob_owned = bob_owned_response.get_json()["milestone"]
+    assert bob_owned["canEdit"] is True
+    assert bob_owned["id"] in {
+        item["id"] for item in client.get("/api/milestones").get_json()["items"]
+    }
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "charlie", "password": "CharliePass123"},
+    ).status_code == 200
+    charlie_ids = {item["id"] for item in client.get("/api/milestones").get_json()["items"]}
+    assert charlie_ids == {global_milestone["id"], bob_owned["id"]}
+    assert client.delete(f"/api/milestones/{bob_owned['id']}").status_code == 403
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "bob", "password": "BobPass123"},
+    ).status_code == 200
+    update_response = client.patch(
+        f"/api/milestones/{bob_owned['id']}",
+        json={"status": "completed", "description": "已经交付"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.get_json()["milestone"]["status"] == "completed"
+    assert client.delete(f"/api/milestones/{bob_owned['id']}").status_code == 200
+    assert bob_owned["id"] not in {
+        item["id"] for item in client.get("/api/milestones").get_json()["items"]
+    }

@@ -38,6 +38,8 @@ import {
   Clipboard,
   Edit3,
   ExternalLink,
+  Flag,
+  Globe2,
   Link2,
   Languages,
   LogOut,
@@ -46,6 +48,7 @@ import {
   Monitor,
   Moon,
   Palette,
+  Phone,
   Plus,
   RefreshCw,
   Repeat2,
@@ -65,13 +68,16 @@ import {
   createGroup,
   createCalendarSubscription,
   createMeeting,
+  createMilestone,
   createUser,
   deleteGroup,
   deleteMeeting,
+  deleteMilestone,
   deleteUser,
   fetchCurrentUser,
   fetchGroups,
   fetchMeetings,
+  fetchMilestones,
   fetchPasswordResetRequests,
   fetchPublicMeeting,
   fetchUsers,
@@ -87,10 +93,12 @@ import {
   resetUserPassword,
   searchUserDirectory,
   updateUser,
+  updateCurrentUserProfile,
   updateCurrentUserPreferences,
   updateGroup,
   updateGroupMember,
   updateMeeting,
+  updateMilestone,
   verifyMeetingPassword,
   changePassword,
 } from "./api";
@@ -121,6 +129,12 @@ const statusMap = {
   Cancelled: { text: "已取消", color: "error", className: "status-cancelled" },
 };
 
+const milestoneStatusMap = {
+  planned: { text: "计划", color: "blue", className: "milestone-planned" },
+  in_progress: { text: "进行中", color: "orange", className: "milestone-in-progress" },
+  completed: { text: "已完成", color: "green", className: "milestone-completed" },
+};
+
 const recurrenceTypeOptions = [
   { label: "每周", value: "weekly" },
   { label: "每两周", value: "biweekly" },
@@ -138,6 +152,65 @@ function displayJobTitle(user, includeAdminSuffix = false) {
   return includeAdminSuffix && user?.role === "admin"
     ? t("{{jobTitle}}（管理员）", { jobTitle })
     : jobTitle;
+}
+
+function splitInternationalPhoneNumber(phoneNumber) {
+  const normalized = String(phoneNumber || "").trim();
+  if (!normalized) {
+    return { countryCode: "+86", localNumber: "" };
+  }
+  const separated = normalized.match(/^(\+\d{0,4})\s+(.+)$/);
+  if (separated) {
+    return { countryCode: separated[1], localNumber: separated[2].trim() };
+  }
+  if (/^\+\d{0,4}$/.test(normalized)) {
+    return { countryCode: normalized, localNumber: "" };
+  }
+  if (/^\+86\d+/.test(normalized)) {
+    return { countryCode: "+86", localNumber: normalized.slice(3) };
+  }
+  return { countryCode: "+86", localNumber: normalized };
+}
+
+function completeInternationalPhoneNumber(phoneNumber) {
+  const { countryCode, localNumber } = splitInternationalPhoneNumber(phoneNumber);
+  const normalizedLocalNumber = localNumber.trim();
+  if (!normalizedLocalNumber) return "";
+  const normalizedCountryCode = /^\+\d{1,4}$/.test(countryCode) ? countryCode : "+86";
+  return `${normalizedCountryCode} ${normalizedLocalNumber}`;
+}
+
+function InternationalPhoneInput({ value, onChange }) {
+  const { countryCode, localNumber } = splitInternationalPhoneNumber(value);
+  const emitChange = (nextCountryCode, nextLocalNumber) => {
+    onChange?.(`${nextCountryCode}${nextLocalNumber ? ` ${nextLocalNumber}` : ""}`.trim());
+  };
+
+  return (
+    <Space.Compact block>
+      <Input
+        value={countryCode}
+        onChange={(event) => {
+          const digits = event.target.value.replace(/\D/g, "").slice(0, 4);
+          emitChange(digits ? `+${digits}` : "+", localNumber);
+        }}
+        inputMode="tel"
+        autoComplete="tel-country-code"
+        maxLength={5}
+        aria-label={t("国家区号")}
+        style={{ width: 96, flex: "0 0 96px" }}
+      />
+      <Input
+        value={localNumber}
+        onChange={(event) => emitChange(countryCode || "+86", event.target.value)}
+        type="tel"
+        inputMode="tel"
+        autoComplete="tel-national"
+        maxLength={32}
+        aria-label={t("电话号码")}
+      />
+    </Space.Compact>
+  );
 }
 
 const userStatusLabels = {
@@ -1040,7 +1113,10 @@ function AuthScreen({ onAuthenticated }) {
   const handleRegister = async (values) => {
     setSubmitting(true);
     try {
-      await registerAccount(values);
+      await registerAccount({
+        ...values,
+        phoneNumber: completeInternationalPhoneNumber(values.phoneNumber),
+      });
       messageApi.success(t("申请已提交，请等待管理员审核"));
       setMode("login");
     } catch (error) {
@@ -1153,6 +1229,9 @@ function AuthScreen({ onAuthenticated }) {
               rules={[{ required: true, message: t("请输入职称") }]}
             >
               <Input maxLength={80} placeholder={t("例如：教授、项目经理、工程师")} />
+            </Form.Item>
+            <Form.Item label={t("电话号码")} name="phoneNumber">
+              <InternationalPhoneInput />
             </Form.Item>
             <Form.Item
               label={t("邮箱")}
@@ -1400,6 +1479,7 @@ function AdminReviewSection({ pendingUsers, loadingId, onApprove, onReject, onRe
                 <Text strong>{item.displayName}</Text>
                 <Text type="secondary">@{item.username}</Text>
                 <Text type="secondary">{displayJobTitle(item)}</Text>
+                <Text type="secondary">{item.phoneNumber || t("未填写电话号码")}</Text>
                 <Text className="review-message">{item.registerMessage}</Text>
               </div>
               <Space size={6} wrap>
@@ -1489,12 +1569,14 @@ function UserFormModal({ open, mode, initialValues, loading, onCancel, onSubmit 
         displayName: initialValues.displayName,
         email: initialValues.email,
         jobTitle: initialValues.jobTitle,
+        phoneNumber: initialValues.phoneNumber || "+86",
         role: initialValues.role,
         status: initialValues.status,
       });
       return;
     }
     form.setFieldsValue({
+      phoneNumber: "+86",
       role: "scheduler",
       status: "active",
     });
@@ -1552,6 +1634,10 @@ function UserFormModal({ open, mode, initialValues, loading, onCancel, onSubmit 
           rules={[{ required: true, message: t("请输入职称") }]}
         >
           <Input maxLength={80} placeholder={t("例如：教授、项目经理、工程师")} />
+        </Form.Item>
+
+        <Form.Item label={t("电话号码")} name="phoneNumber">
+          <InternationalPhoneInput />
         </Form.Item>
 
         {mode === "create" && (
@@ -1663,6 +1749,9 @@ function UserManagementDrawer({
                 </Space>
                 <Text type="secondary">{item.email || t("未填写邮箱")}</Text>
                 <Text type="secondary">{t("职称：")}{displayJobTitle(item)}</Text>
+                <Text type="secondary">
+                  {t("电话号码：")}{item.phoneNumber || t("未填写电话号码")}
+                </Text>
                 <Space wrap size={6}>
                   <Tag color={item.role === "admin" ? "gold" : "blue"}>
                     {roleLabels[item.role] ? t(roleLabels[item.role]) : item.role}
@@ -1694,6 +1783,57 @@ function UserManagementDrawer({
                   <Button size="small" danger icon={<Trash2 size={14} />} loading={loadingId === item.id}>{t("删除")}</Button>
                 </Popconfirm>
               </Space>
+            </div>
+          </List.Item>
+        )}
+      />
+    </Drawer>
+  );
+}
+
+function PersonnelDirectoryDrawer({ open, users, onClose }) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleUsers = useMemo(() => {
+    if (!normalizedQuery) return users;
+    return users.filter((user) =>
+      [user.displayName, user.jobTitle, user.phoneNumber, user.email].some((value) =>
+        String(value || "").toLocaleLowerCase().includes(normalizedQuery),
+      ),
+    );
+  }, [normalizedQuery, users]);
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  return (
+    <Drawer title={t("人员信息")} open={open} onClose={onClose} width={640}>
+      <Input
+        allowClear
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder={t("搜索姓名、职称、电话号码或邮箱")}
+        className="directory-search"
+      />
+      <List
+        dataSource={visibleUsers}
+        locale={{
+          emptyText: (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("暂无人员信息")} />
+          ),
+        }}
+        renderItem={(item) => (
+          <List.Item>
+            <div className="user-row-main">
+              <Text strong>{item.displayName}</Text>
+              <Text type="secondary">{t("职称：")}{displayJobTitle(item)}</Text>
+              <Text type="secondary">
+                <Phone size={14} /> {item.phoneNumber || t("未填写电话号码")}
+              </Text>
+              <Text type="secondary">
+                <Mail size={14} /> {item.email || t("未填写邮箱")}
+              </Text>
             </div>
           </List.Item>
         )}
@@ -1952,7 +2092,7 @@ function GroupManagementDrawer({
                             )
                           }
                         >
-                          {member.groupRole === "admin" ? t("设为成员") : t("设为管理员")}
+                          {member.groupRole === "admin" ? t("取消管理员") : t("设为管理员")}
                         </Button>
                         <Popconfirm
                           title={t("移除组成员")}
@@ -2011,7 +2151,6 @@ function PreferencesPopover({
   emailNotificationsEnabled,
   emailPreferenceSaving,
   onEmailNotificationsChange,
-  onOpenPasswordChange,
 }) {
   const [open, setOpen] = useState(false);
   const [customColorInput, setCustomColorInput] = useState(customThemeColor || "");
@@ -2156,14 +2295,6 @@ function PreferencesPopover({
             aria-label={t("接收会议邮件提醒")}
           />
         </div>
-        <Button
-          block
-          icon={<LockKeyhole size={16} />}
-          onClick={() => {
-            setOpen(false);
-            onOpenPasswordChange();
-          }}
-        >{t("修改密码")}</Button>
       </div>
     </div>
   );
@@ -2182,6 +2313,239 @@ function PreferencesPopover({
   );
 }
 
+function ProfileModal({ open, user, loading, onCancel, onSubmit, onOpenPasswordChange }) {
+  const [form] = Form.useForm();
+
+  useEffect(() => {
+    if (!open) return;
+    form.resetFields();
+    form.setFieldsValue({
+      displayName: user.displayName,
+      phoneNumber: user.phoneNumber || "+86",
+      email: user.email,
+    });
+  }, [form, open, user]);
+
+  return (
+    <Modal
+      title={t("个人资料")}
+      open={open}
+      onCancel={onCancel}
+      footer={null}
+      centered
+      width={520}
+      destroyOnHidden
+    >
+      <Form form={form} layout="vertical" onFinish={onSubmit}>
+        <Form.Item
+          label={t("用户昵称（真实姓名）")}
+          name="displayName"
+          rules={[{ required: true, message: t("请输入用户昵称（真实姓名）") }]}
+        >
+          <Input maxLength={80} />
+        </Form.Item>
+
+        <Form.Item label={t("电话号码")} name="phoneNumber">
+          <InternationalPhoneInput />
+        </Form.Item>
+
+        <Form.Item
+          label={t("邮箱")}
+          name="email"
+          rules={[
+            { required: true, message: t("请输入邮箱") },
+            { type: "email", message: t("邮箱格式无效") },
+          ]}
+        >
+          <Input type="email" autoComplete="email" maxLength={120} />
+        </Form.Item>
+
+        <Flex justify="space-between" align="center" gap={10} className="modal-actions">
+          <Button
+            icon={<LockKeyhole size={16} />}
+            onClick={() => {
+              onCancel();
+              onOpenPasswordChange();
+            }}
+          >{t("修改密码")}</Button>
+          <Space size={8}>
+            <Button onClick={onCancel}>{t("取消")}</Button>
+            <Button type="primary" htmlType="submit" loading={loading} icon={<UserCheck size={16} />}>
+              {t("保存")}
+            </Button>
+          </Space>
+        </Flex>
+      </Form>
+    </Modal>
+  );
+}
+
+function MilestoneFormModal({
+  open,
+  mode,
+  initialValues,
+  currentUser,
+  directoryUsers,
+  loading,
+  onCancel,
+  onSubmit,
+}) {
+  const [form] = Form.useForm();
+  const isGlobal = Form.useWatch("isGlobal", form);
+
+  useEffect(() => {
+    if (!open) return;
+    if (mode === "edit" && initialValues) {
+      form.setFieldsValue({
+        title: initialValues.title,
+        description: initialValues.description,
+        dueDate: dayjs(initialValues.dueDate),
+        status: initialValues.status,
+        isGlobal: initialValues.isGlobal,
+        relatedUserIds: initialValues.relatedUsers?.map((user) => user.id) || [],
+      });
+      return;
+    }
+    form.setFieldsValue({
+      title: "",
+      description: "",
+      dueDate: dayjs().add(7, "day"),
+      status: "planned",
+      isGlobal: false,
+      relatedUserIds: currentUser?.id ? [currentUser.id] : [],
+    });
+  }, [currentUser?.id, form, initialValues, mode, open]);
+
+  const userOptions = useMemo(
+    () =>
+      directoryUsers.map((user) => ({
+        value: user.id,
+        label: user.displayName,
+        searchText: [user.displayName, user.username, user.email, user.jobTitle]
+          .filter(Boolean)
+          .join(" "),
+        user,
+      })),
+    [directoryUsers],
+  );
+
+  return (
+    <Modal
+      title={mode === "edit" ? t("编辑里程碑") : t("新建里程碑")}
+      open={open}
+      onCancel={onCancel}
+      footer={null}
+      width={620}
+      destroyOnHidden
+    >
+      <Form
+        form={form}
+        layout="vertical"
+        onFinish={(values) =>
+          onSubmit({
+            title: values.title,
+            description: values.description || "",
+            dueDate: values.dueDate.format("YYYY-MM-DD"),
+            status: values.status,
+            isGlobal: Boolean(values.isGlobal),
+            relatedUserIds: values.isGlobal ? [] : values.relatedUserIds,
+          })
+        }
+      >
+        <Form.Item
+          label={t("里程碑标题")}
+          name="title"
+          rules={[{ required: true, whitespace: true, message: t("请输入里程碑标题") }]}
+        >
+          <Input maxLength={160} placeholder={t("例如：完成产品首个版本")} />
+        </Form.Item>
+
+        <Form.Item label={t("描述")} name="description">
+          <Input.TextArea
+            rows={4}
+            maxLength={2000}
+            showCount
+            placeholder={t("补充目标、交付内容或验收标准")}
+          />
+        </Form.Item>
+
+        <div className="form-grid milestone-form-grid">
+          <Form.Item
+            label={t("截止日期")}
+            name="dueDate"
+            rules={[{ required: true, message: t("请选择截止日期") }]}
+          >
+            <DatePicker className="full-width" />
+          </Form.Item>
+          <Form.Item
+            label={t("状态")}
+            name="status"
+            rules={[{ required: true, message: t("请选择状态") }]}
+          >
+            <Select
+              options={Object.entries(milestoneStatusMap).map(([value, config]) => ({
+                value,
+                label: t(config.text),
+              }))}
+            />
+          </Form.Item>
+        </div>
+
+        <Form.Item
+          label={t("全部人（全局）")}
+          name="isGlobal"
+          valuePropName="checked"
+          extra={t("开启后，所有有效用户都能在自己的日历中看到这个里程碑。")}
+        >
+          <Switch
+            checkedChildren={t("全局")}
+            unCheckedChildren={t("指定用户")}
+            onChange={(checked) => {
+              if (!checked && !form.getFieldValue("relatedUserIds")?.length && currentUser?.id) {
+                form.setFieldValue("relatedUserIds", [currentUser.id]);
+              }
+            }}
+          />
+        </Form.Item>
+
+        {!isGlobal && (
+          <Form.Item
+            label={t("相关用户")}
+            name="relatedUserIds"
+            rules={[{ required: true, message: t("请至少选择一名相关用户") }]}
+          >
+            <Select
+              mode="multiple"
+              showSearch
+              allowClear
+              optionFilterProp="searchText"
+              options={userOptions}
+              placeholder={t("选择相关用户")}
+              optionRender={(option) => (
+                <div className="attendee-option">
+                  <span className="attendee-option-name">{option.data.user.displayName}</span>
+                  <span className="attendee-option-meta">
+                    @{option.data.user.username} · {option.data.user.email}
+                  </span>
+                </div>
+              )}
+            />
+          </Form.Item>
+        )}
+
+        <Flex justify="end" className="modal-actions">
+          <Space>
+            <Button onClick={onCancel}>{t("取消")}</Button>
+            <Button type="primary" htmlType="submit" loading={loading} icon={<Flag size={16} />}>
+              {mode === "edit" ? t("保存") : t("创建")}
+            </Button>
+          </Space>
+        </Flex>
+      </Form>
+    </Modal>
+  );
+}
+
 function ManagementApp({
   currentUser,
   onCurrentUserChange,
@@ -2191,7 +2555,9 @@ function ManagementApp({
   onPreferenceChange,
 }) {
   const [meetings, setMeetings] = useState([]);
+  const [milestones, setMilestones] = useState([]);
   const [groups, setGroups] = useState([]);
+  const [directoryUsers, setDirectoryUsers] = useState([]);
   const [users, setUsers] = useState([]);
   const [pendingUsers, setPendingUsers] = useState([]);
   const [passwordResetRequests, setPasswordResetRequests] = useState([]);
@@ -2205,9 +2571,12 @@ function ManagementApp({
   const [passwordForm] = Form.useForm();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [passwordChanging, setPasswordChanging] = useState(false);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
   const [emailPreferenceSaving, setEmailPreferenceSaving] = useState(false);
   const [customThemeSaving, setCustomThemeSaving] = useState(false);
   const [groupDrawerOpen, setGroupDrawerOpen] = useState(false);
+  const [directoryDrawerOpen, setDirectoryDrawerOpen] = useState(false);
   const [groupFormOpen, setGroupFormOpen] = useState(false);
   const [groupFormMode, setGroupFormMode] = useState("create");
   const [groupMemberOpen, setGroupMemberOpen] = useState(false);
@@ -2223,6 +2592,10 @@ function ManagementApp({
   const [formMode, setFormMode] = useState("create");
   const [selectedMeeting, setSelectedMeeting] = useState(null);
   const [createdMeeting, setCreatedMeeting] = useState(null);
+  const [milestoneFormOpen, setMilestoneFormOpen] = useState(false);
+  const [milestoneFormMode, setMilestoneFormMode] = useState("create");
+  const [selectedMilestone, setSelectedMilestone] = useState(null);
+  const [milestoneSaving, setMilestoneSaving] = useState(false);
   const [calendarSubscriptionOpen, setCalendarSubscriptionOpen] = useState(false);
   const [calendarSubscription, setCalendarSubscription] = useState(null);
   const [calendarSubscriptionLoading, setCalendarSubscriptionLoading] = useState(false);
@@ -2276,18 +2649,58 @@ function ManagementApp({
     }
   };
 
+  const handleProfileSubmit = async (values) => {
+    const normalizedProfile = {
+      displayName: String(values.displayName || "").trim(),
+      phoneNumber: completeInternationalPhoneNumber(values.phoneNumber),
+      email: String(values.email || "").trim().toLocaleLowerCase(),
+    };
+    const currentProfile = {
+      displayName: String(currentUser.displayName || "").trim(),
+      phoneNumber: completeInternationalPhoneNumber(currentUser.phoneNumber),
+      email: String(currentUser.email || "").trim().toLocaleLowerCase(),
+    };
+    const profileChanged = Object.keys(normalizedProfile).some(
+      (field) => normalizedProfile[field] !== currentProfile[field],
+    );
+    if (!profileChanged) {
+      messageApi.warning(t("没有改变"));
+      return;
+    }
+
+    setProfileSaving(true);
+    try {
+      const data = await updateCurrentUserProfile(normalizedProfile);
+      onCurrentUserChange(data.user);
+      setUsers((items) =>
+        items.map((item) => (item.id === data.user.id ? { ...item, ...data.user } : item)),
+      );
+      const directoryData = await searchUserDirectory();
+      setDirectoryUsers(directoryData.items || []);
+      setProfileModalOpen(false);
+      messageApi.success(t("个人资料已更新"));
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   const loadData = async ({ silent = false } = {}) => {
     if (!silent) {
       setLoading(true);
     }
     try {
-      const requests = [fetchMeetings(), fetchGroups()];
+      const requests = [fetchMeetings(), fetchMilestones(), fetchGroups(), searchUserDirectory()];
       if (isAdmin) {
         requests.push(fetchUsers(), fetchPasswordResetRequests("pending"));
       }
-      const [meetingData, groupData, userData, resetData] = await Promise.all(requests);
+      const [meetingData, milestoneData, groupData, directoryData, userData, resetData] =
+        await Promise.all(requests);
       setMeetings(meetingData.items || []);
+      setMilestones(milestoneData.items || []);
       setGroups(groupData.items || []);
+      setDirectoryUsers(directoryData.items || []);
       const userItems = isAdmin ? userData?.items || [] : [];
       setUsers(userItems);
       setPendingUsers(userItems.filter((item) => item.status === "pending"));
@@ -2509,8 +2922,12 @@ function ManagementApp({
   const handleUserSubmit = async (values) => {
     setUserSaving(true);
     try {
+      const userValues = {
+        ...values,
+        phoneNumber: completeInternationalPhoneNumber(values.phoneNumber),
+      };
       if (userFormMode === "edit" && selectedUser) {
-        const data = await updateUser(selectedUser.id, values);
+        const data = await updateUser(selectedUser.id, userValues);
         if (data.user.id === currentUser.id) {
           onCurrentUserChange(data.user);
         }
@@ -2522,13 +2939,15 @@ function ManagementApp({
         );
         messageApi.success(t("用户已更新"));
       } else {
-        const data = await createUser(values);
+        const data = await createUser(userValues);
         setUsers((items) => [data.user, ...items]);
         if (data.user.status === "pending") {
           setPendingUsers((items) => [data.user, ...items]);
         }
         messageApi.success(t("用户已创建"));
       }
+      const directoryData = await searchUserDirectory();
+      setDirectoryUsers(directoryData.items || []);
       setUserFormOpen(false);
     } catch (error) {
       messageApi.error(error.message);
@@ -2543,6 +2962,8 @@ function ManagementApp({
       await deleteUser(user.id);
       setUsers((items) => items.filter((item) => item.id !== user.id));
       setPendingUsers((items) => items.filter((item) => item.id !== user.id));
+      const directoryData = await searchUserDirectory();
+      setDirectoryUsers(directoryData.items || []);
       messageApi.success(t("用户已删除"));
     } catch (error) {
       messageApi.error(error.message);
@@ -2624,10 +3045,34 @@ function ManagementApp({
     [visibleMeetings],
   );
 
+  const relatedMilestones = useMemo(
+    () =>
+      [...milestones].sort((a, b) => {
+        const dueDateOrder = String(a.dueDate).localeCompare(String(b.dueDate));
+        return dueDateOrder || a.id - b.id;
+      }),
+    [milestones],
+  );
+
+  const milestonesByDate = useMemo(() => {
+    const grouped = new Map();
+    relatedMilestones.forEach((milestone) => {
+      const list = grouped.get(milestone.dueDate) || [];
+      list.push(milestone);
+      grouped.set(milestone.dueDate, list);
+    });
+    return grouped;
+  }, [relatedMilestones]);
+
   const selectedMeetingFresh = useMemo(() => {
     if (!selectedMeeting) return null;
     return visibleMeetings.find((meeting) => meeting.id === selectedMeeting.id) || null;
   }, [selectedMeeting, visibleMeetings]);
+
+  const selectedMilestoneFresh = useMemo(() => {
+    if (!selectedMilestone) return null;
+    return milestones.find((milestone) => milestone.id === selectedMilestone.id) || null;
+  }, [milestones, selectedMilestone]);
 
   const summary = useMemo(
     () => ({
@@ -2660,6 +3105,62 @@ function ManagementApp({
     setFormMode("create");
     setSelectedMeeting(null);
     setFormOpen(true);
+  };
+
+  const showMeeting = (meeting) => {
+    setSelectedMilestone(null);
+    setSelectedMeeting(meeting);
+  };
+
+  const showMilestone = (milestone) => {
+    setSelectedMeeting(null);
+    setSelectedMilestone(milestone);
+  };
+
+  const openCreateMilestone = () => {
+    setMilestoneFormMode("create");
+    setSelectedMilestone(null);
+    setMilestoneFormOpen(true);
+  };
+
+  const openEditMilestone = (milestone) => {
+    setMilestoneFormMode("edit");
+    setSelectedMilestone(milestone);
+    setMilestoneFormOpen(true);
+  };
+
+  const handleMilestoneSubmit = async (payload) => {
+    setMilestoneSaving(true);
+    try {
+      if (milestoneFormMode === "edit" && selectedMilestoneFresh) {
+        const data = await updateMilestone(selectedMilestoneFresh.id, payload);
+        setMilestones((items) =>
+          items.map((item) => (item.id === data.milestone.id ? data.milestone : item)),
+        );
+        setSelectedMilestone(data.milestone);
+        messageApi.success(t("里程碑已更新"));
+      } else {
+        const data = await createMilestone(payload);
+        setMilestones((items) => [data.milestone, ...items]);
+        messageApi.success(t("里程碑已创建"));
+      }
+      setMilestoneFormOpen(false);
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setMilestoneSaving(false);
+    }
+  };
+
+  const handleDeleteMilestone = async (milestone) => {
+    try {
+      await deleteMilestone(milestone.id);
+      setMilestones((items) => items.filter((item) => item.id !== milestone.id));
+      setSelectedMilestone(null);
+      messageApi.success(t("里程碑已删除"));
+    } catch (error) {
+      messageApi.error(error.message);
+    }
   };
 
   const openEdit = (meeting) => {
@@ -2764,6 +3265,7 @@ function ManagementApp({
   const renderCalendarCell = (current) => {
     const key = current.format("YYYY-MM-DD");
     const dayMeetings = meetingsByDate.get(key) || [];
+    const dayMilestones = milestonesByDate.get(key) || [];
     const isOutsideMonth = calendarView === "month" && !current.isSame(calendarValue, "month");
     const isSelected = current.isSame(calendarValue, "day");
     const isToday = current.isSame(dayjs(), "day");
@@ -2802,13 +3304,35 @@ function ManagementApp({
                 className={`meeting-chip ${status.className}`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  setSelectedMeeting(meeting);
+                  showMeeting(meeting);
                 }}
               >
                 <span className="chip-time">{dayjs(meeting.startTime).format("HH:mm")}</span>
                 <span className="chip-title">
+                  <Video size={12} className="chip-repeat-icon" />
                   {meeting.isRecurring && <Repeat2 size={12} className="chip-repeat-icon" />}
                   <span>{meeting.title}</span>
+                </span>
+              </button>
+            );
+          })}
+          {dayMilestones.map((milestone) => {
+            const status = milestoneStatusMap[milestone.status] || milestoneStatusMap.planned;
+            return (
+              <button
+                key={`milestone-${milestone.id}`}
+                type="button"
+                className={`meeting-chip milestone-chip ${status.className}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  showMilestone(milestone);
+                }}
+              >
+                <span className="chip-time milestone-kind">
+                  <Flag size={12} />
+                </span>
+                <span className="chip-title">
+                  <span>{milestone.title}</span>
                 </span>
               </button>
             );
@@ -2840,6 +3364,14 @@ function ManagementApp({
           onClick={openCreate}
           className="create-button"
         >{t("创建会议")}</Button>
+
+        <Button
+          size="large"
+          block
+          icon={<Flag size={18} />}
+          onClick={openCreateMilestone}
+          className="milestone-create-button"
+        >{t("新建里程碑")}</Button>
 
         <div className="summary-grid">
           <div>
@@ -2887,6 +3419,52 @@ function ManagementApp({
           </>
         )}
 
+        <section className="side-section milestone-side-section">
+          <Flex align="center" justify="space-between">
+            <Text strong>{t("我的里程碑")}</Text>
+            <Tag color="purple">{relatedMilestones.length}</Tag>
+          </Flex>
+          <List
+            size="small"
+            dataSource={relatedMilestones}
+            locale={{
+              emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("暂无相关里程碑")} />,
+            }}
+            renderItem={(milestone) => {
+              const status = milestoneStatusMap[milestone.status] || milestoneStatusMap.planned;
+              return (
+                <List.Item
+                  className="related-meeting-item milestone-list-item"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => showMilestone(milestone)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      showMilestone(milestone);
+                    }
+                  }}
+                >
+                  <div className="related-meeting-line">
+                    <Badge color={status.color} />
+                    <div>
+                      <Text>
+                        {milestone.isGlobal && <Globe2 size={13} className="inline-icon" />}
+                        {milestone.title}
+                      </Text>
+                      <Text type="secondary">
+                        {t("截止 {{date}}", {
+                          date: dayjs(milestone.dueDate).format(t("YYYY年 M月D日")),
+                        })}
+                      </Text>
+                    </div>
+                  </div>
+                </List.Item>
+              );
+            }}
+          />
+        </section>
+
         <section className="side-section">
           <Flex align="center" justify="space-between">
             <Text strong>{t("我的参会会议")}</Text>
@@ -2903,11 +3481,11 @@ function ManagementApp({
                 className="related-meeting-item"
                 role="button"
                 tabIndex={0}
-                onClick={() => setSelectedMeeting(meeting)}
+                onClick={() => showMeeting(meeting)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    setSelectedMeeting(meeting);
+                    showMeeting(meeting);
                   }
                 }}
               >
@@ -2928,7 +3506,7 @@ function ManagementApp({
         <Flex align="center" justify="space-between" className="topbar">
           <div>
             <Title level={2}>{t("会议日历")}</Title>
-            <Text type="secondary">{t("点击会议实体查看链接、参会者和编辑入口")}</Text>
+            <Text type="secondary">{t("点击会议或里程碑卡片查看详情")}</Text>
           </div>
           <Space size={12} wrap className="user-actions">
             <div className="user-pill">
@@ -2945,10 +3523,15 @@ function ManagementApp({
               emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
               emailPreferenceSaving={emailPreferenceSaving}
               onEmailNotificationsChange={handleEmailNotificationsChange}
-              onOpenPasswordChange={() => setPasswordModalOpen(true)}
             />
+            <Button icon={<UserCheck size={16} />} onClick={() => setProfileModalOpen(true)}>
+              {t("修改个人资料")}
+            </Button>
             <Button icon={<CalendarPlus size={16} />} onClick={openCalendarSubscription}>
               {t("订阅日历")}
+            </Button>
+            <Button icon={<Users size={16} />} onClick={() => setDirectoryDrawerOpen(true)}>
+              {t("人员信息")}
             </Button>
             <Button icon={<Users size={16} />} onClick={() => setGroupDrawerOpen(true)}>{t("用户组")}</Button>
             <Button icon={<LogOut size={16} />} loading={loggingOut} onClick={handleLogout}>{t("退出")}</Button>
@@ -2987,6 +3570,86 @@ function ManagementApp({
           </section>
         </Spin>
       </main>
+
+      <Drawer
+        title={t("里程碑详情")}
+        open={Boolean(selectedMilestoneFresh)}
+        onClose={() => setSelectedMilestone(null)}
+        width={500}
+        extra={
+          selectedMilestoneFresh?.canEdit && (
+            <Space>
+              <Button
+                icon={<Edit3 size={16} />}
+                onClick={() => openEditMilestone(selectedMilestoneFresh)}
+              >
+                {t("编辑")}
+              </Button>
+              <Popconfirm
+                title={t("删除里程碑")}
+                description={t("删除后无法恢复，确定继续吗？")}
+                okText={t("删除")}
+                cancelText={t("取消")}
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDeleteMilestone(selectedMilestoneFresh)}
+              >
+                <Button danger icon={<Trash2 size={16} />}>{t("删除")}</Button>
+              </Popconfirm>
+            </Space>
+          )
+        }
+      >
+        {selectedMilestoneFresh && (
+          <Space direction="vertical" size={20} className="drawer-content">
+            <div>
+              <Space align="center" wrap>
+                <Title level={3} className="drawer-title">
+                  {selectedMilestoneFresh.title}
+                </Title>
+                <Tag color={milestoneStatusMap[selectedMilestoneFresh.status]?.color}>
+                  {t(milestoneStatusMap[selectedMilestoneFresh.status]?.text || "计划")}
+                </Tag>
+                {selectedMilestoneFresh.isGlobal && (
+                  <Tag icon={<Globe2 size={12} />} color="purple">{t("全局")}</Tag>
+                )}
+              </Space>
+            </div>
+
+            <div className="milestone-description">
+              <Text type="secondary">{t("描述")}</Text>
+              <Text>{selectedMilestoneFresh.description || t("暂无描述")}</Text>
+            </div>
+
+            <Descriptions column={1} size="middle" bordered>
+              <Descriptions.Item label={t("截止日期")}>
+                {dayjs(selectedMilestoneFresh.dueDate).format(t("YYYY年 M月D日"))}
+              </Descriptions.Item>
+              <Descriptions.Item label={t("创建者")}>
+                {selectedMilestoneFresh.createdBy.displayName}
+              </Descriptions.Item>
+              <Descriptions.Item label={t("可见范围")}>
+                {selectedMilestoneFresh.isGlobal ? t("全部人（全局）") : t("指定相关用户")}
+              </Descriptions.Item>
+            </Descriptions>
+
+            <section>
+              <Flex align="center" gap={8} className="section-title">
+                <Users size={18} />
+                <Text strong>{t("相关用户")}</Text>
+              </Flex>
+              {selectedMilestoneFresh.isGlobal ? (
+                <Tag icon={<Globe2 size={12} />} color="purple">{t("全部有效用户")}</Tag>
+              ) : (
+                <div className="attendee-list">
+                  {selectedMilestoneFresh.relatedUsers.map((user) => (
+                    <Tag key={user.id}>{user.displayName}</Tag>
+                  ))}
+                </div>
+              )}
+            </section>
+          </Space>
+        )}
+      </Drawer>
 
       <Drawer
         title={t("会议信息")}
@@ -3134,6 +3797,17 @@ function ManagementApp({
         onSubmit={handleSubmit}
       />
 
+      <MilestoneFormModal
+        open={milestoneFormOpen}
+        mode={milestoneFormMode}
+        initialValues={milestoneFormMode === "edit" ? selectedMilestoneFresh : null}
+        currentUser={currentUser}
+        directoryUsers={directoryUsers}
+        loading={milestoneSaving}
+        onCancel={() => setMilestoneFormOpen(false)}
+        onSubmit={handleMilestoneSubmit}
+      />
+
       <CreationResultModal
         meeting={createdMeeting}
         onClose={() => setCreatedMeeting(null)}
@@ -3146,6 +3820,12 @@ function ManagementApp({
         loading={calendarSubscriptionLoading}
         onClose={() => setCalendarSubscriptionOpen(false)}
         onCopy={copyText}
+      />
+
+      <PersonnelDirectoryDrawer
+        open={directoryDrawerOpen}
+        users={directoryUsers}
+        onClose={() => setDirectoryDrawerOpen(false)}
       />
 
       <GroupManagementDrawer
@@ -3178,6 +3858,15 @@ function ManagementApp({
         loading={groupSaving}
         onCancel={() => setGroupMemberOpen(false)}
         onSubmit={handleAddGroupMember}
+      />
+
+      <ProfileModal
+        open={profileModalOpen}
+        user={currentUser}
+        loading={profileSaving}
+        onCancel={() => setProfileModalOpen(false)}
+        onSubmit={handleProfileSubmit}
+        onOpenPasswordChange={() => setPasswordModalOpen(true)}
       />
 
       <Modal

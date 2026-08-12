@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
+from pypinyin import Style, lazy_pinyin
+
 from config import config
 from crypto import hash_password, verify_password
 from database import get_connection, process_write_lock
@@ -18,6 +20,7 @@ ROLES = {"admin", "scheduler"}
 USER_STATUSES = {"pending", "active", "rejected", "disabled"}
 PASSWORD_RESET_STATUSES = {"pending", "approved", "rejected"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
+DEFAULT_PHONE_NUMBER = ""
 
 
 class AuthError(Exception):
@@ -58,6 +61,13 @@ def normalize_job_title(value: Any) -> str:
     if len(job_title) > 80:
         raise AuthError("职称不能超过 80 个字符")
     return job_title
+
+
+def normalize_phone_number(value: Any) -> str:
+    phone_number = str(value or "").strip()
+    if len(phone_number) > 40:
+        raise AuthError("电话号码不能超过 40 个字符")
+    return "" if re.fullmatch(r"\+\d{1,4}", phone_number) else phone_number
 
 
 def normalize_email(value: Any) -> str | None:
@@ -142,6 +152,7 @@ def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool 
         "displayName": data["display_name"],
         "email": data["email"],
         "jobTitle": data.get("job_title", ""),
+        "phoneNumber": normalize_phone_number(data.get("phone_number", "")),
         "emailNotificationsEnabled": bool(data.get("email_notifications_enabled", 1)),
         "customThemeColor": data.get("custom_theme_color"),
         "role": data["role"],
@@ -209,6 +220,50 @@ def update_own_preferences(user_id: int, payload: dict[str, Any]) -> dict[str, A
             conn.execute(
                 f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
                 values,
+            )
+            row = _fetch_user_by_id(conn, user_id)
+
+    return user_payload(row)
+
+
+def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    profile_fields_present = any(
+        key in payload
+        for key in ("displayName", "display_name", "phoneNumber", "phone_number", "email")
+    )
+    if not profile_fields_present:
+        raise AuthError("没有可更新的个人资料")
+
+    with process_write_lock():
+        with get_connection() as conn:
+            row = _fetch_user_by_id(conn, user_id)
+            if row is None:
+                raise AuthError("用户不存在", 404)
+
+            display_name = (
+                normalize_display_name(payload.get("displayName") or payload.get("display_name"))
+                if "displayName" in payload or "display_name" in payload
+                else row["display_name"]
+            )
+            phone_number = (
+                normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number"))
+                if "phoneNumber" in payload or "phone_number" in payload
+                else row["phone_number"]
+            )
+            email = (
+                normalize_required_email(payload.get("email"))
+                if "email" in payload
+                else row["email"]
+            )
+            _ensure_email_available(conn, email, user_id)
+
+            conn.execute(
+                """
+                UPDATE users
+                   SET display_name = ?, phone_number = ?, email = ?, updated_at = ?
+                 WHERE id = ?
+                """,
+                (display_name, phone_number, email, isoformat(utc_now()), user_id),
             )
             row = _fetch_user_by_id(conn, user_id)
 
@@ -287,6 +342,9 @@ def register_user(payload: dict[str, Any]) -> dict[str, Any]:
     display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
     email = normalize_required_email(payload.get("email"))
     job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
+    phone_number = normalize_phone_number(
+        payload.get("phoneNumber", payload.get("phone_number", DEFAULT_PHONE_NUMBER))
+    )
     password = normalize_password(payload.get("password"))
     register_message = normalize_register_message(
         payload.get("registerMessage") or payload.get("register_message")
@@ -302,16 +360,17 @@ def register_user(payload: dict[str, Any]) -> dict[str, Any]:
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, job_title, password_hash, role, status,
+                    username, display_name, email, job_title, phone_number, password_hash, role, status,
                     register_message, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'scheduler', 'pending', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'scheduler', 'pending', ?, ?, ?)
                 """,
                 (
                     username,
                     display_name,
                     email,
                     job_title,
+                    phone_number,
                     hash_password(password),
                     register_message,
                     now,
@@ -330,11 +389,13 @@ def create_admin_user(
     password: str,
     email: str,
     job_title: str = "",
+    phone_number: str = DEFAULT_PHONE_NUMBER,
 ) -> dict[str, Any]:
     normalized_username = normalize_username(username)
     normalized_display_name = normalize_display_name(display_name)
     normalized_email = normalize_required_email(email)
     normalized_job_title = normalize_job_title(job_title)
+    normalized_phone_number = normalize_phone_number(phone_number)
     normalized_password = normalize_password(password)
     now = isoformat(utc_now())
 
@@ -347,16 +408,17 @@ def create_admin_user(
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, job_title, password_hash, role, status,
+                    username, display_name, email, job_title, phone_number, password_hash, role, status,
                     approved_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'admin', 'active', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'admin', 'active', ?, ?, ?)
                 """,
                 (
                     normalized_username,
                     normalized_display_name,
                     normalized_email,
                     normalized_job_title,
+                    normalized_phone_number,
                     hash_password(normalized_password),
                     now,
                     now,
@@ -506,6 +568,9 @@ def create_user(payload: dict[str, Any]) -> dict[str, Any]:
     display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
     email = normalize_required_email(payload.get("email"))
     job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
+    phone_number = normalize_phone_number(
+        payload.get("phoneNumber", payload.get("phone_number", DEFAULT_PHONE_NUMBER))
+    )
     password = normalize_password(payload.get("password"))
     role = normalize_role(payload.get("role"), "scheduler")
     status = normalize_user_status(payload.get("status"), "active")
@@ -520,16 +585,17 @@ def create_user(payload: dict[str, Any]) -> dict[str, Any]:
             cursor = conn.execute(
                 """
                 INSERT INTO users (
-                    username, display_name, email, job_title, password_hash, role, status,
+                    username, display_name, email, job_title, phone_number, password_hash, role, status,
                     approved_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     username,
                     display_name,
                     email,
                     job_title,
+                    phone_number,
                     hash_password(password),
                     role,
                     status,
@@ -579,11 +645,17 @@ def list_users(status: str | None = None) -> list[dict[str, Any]]:
     return [user_payload(row, include_review_fields=True) for row in rows]
 
 
-def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
+def _directory_sort_key(row: sqlite3.Row) -> tuple[str, str, str]:
+    display_name = str(row["display_name"] or "").strip()
+    pinyin_name = "".join(lazy_pinyin(display_name, style=Style.NORMAL)).casefold()
+    return pinyin_name, display_name.casefold(), str(row["username"] or "").casefold()
+
+
+def search_user_directory(query: Any, limit: int = 500) -> list[dict[str, Any]]:
     normalized_query = str(query or "").strip().casefold()
     if len(normalized_query) > 120:
         raise AuthError("搜索内容不能超过 120 个字符")
-    normalized_limit = max(1, min(int(limit), 50))
+    normalized_limit = max(1, min(int(limit), 500))
 
     with get_connection() as conn:
         if normalized_query:
@@ -593,7 +665,7 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
             pattern = f"%{escaped_query}%"
             rows = conn.execute(
                 """
-                SELECT id, username, display_name, email, job_title
+                SELECT id, username, display_name, email, job_title, phone_number
                   FROM users
                  WHERE status = 'active'
                    AND (
@@ -601,47 +673,27 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
                      OR LOWER(display_name) LIKE ? ESCAPE '\\'
                      OR LOWER(email) LIKE ? ESCAPE '\\'
                      OR LOWER(job_title) LIKE ? ESCAPE '\\'
+                     OR LOWER(phone_number) LIKE ? ESCAPE '\\'
                    )
-                 ORDER BY
-                    CASE
-                      WHEN LOWER(username) = ? THEN 0
-                      WHEN LOWER(email) = ? THEN 0
-                      WHEN LOWER(display_name) = ? THEN 1
-                      WHEN LOWER(username) LIKE ? ESCAPE '\\' THEN 2
-                      WHEN LOWER(display_name) LIKE ? ESCAPE '\\' THEN 3
-                      WHEN LOWER(job_title) LIKE ? ESCAPE '\\' THEN 4
-                      ELSE 5
-                    END,
-                    display_name COLLATE NOCASE ASC,
-                    username COLLATE NOCASE ASC
-                 LIMIT ?
                 """,
                 (
                     pattern,
                     pattern,
                     pattern,
                     pattern,
-                    normalized_query,
-                    normalized_query,
-                    normalized_query,
-                    f"{escaped_query}%",
-                    f"{escaped_query}%",
-                    f"{escaped_query}%",
-                    normalized_limit,
+                    pattern,
                 ),
             ).fetchall()
         else:
             rows = conn.execute(
                 """
-                SELECT id, username, display_name, email, job_title
+                SELECT id, username, display_name, email, job_title, phone_number
                   FROM users
                  WHERE status = 'active'
-                 ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC
-                 LIMIT ?
-                """,
-                (normalized_limit,),
+                """
             ).fetchall()
 
+    rows = sorted(rows, key=_directory_sort_key)[:normalized_limit]
     return [
         {
             "id": row["id"],
@@ -649,6 +701,7 @@ def search_user_directory(query: Any, limit: int = 20) -> list[dict[str, Any]]:
             "displayName": row["display_name"],
             "email": row["email"],
             "jobTitle": row["job_title"],
+            "phoneNumber": normalize_phone_number(row["phone_number"]),
         }
         for row in rows
     ]
@@ -680,6 +733,11 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                 if "jobTitle" in payload or "job_title" in payload
                 else row["job_title"]
             )
+            phone_number = (
+                normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number"))
+                if "phoneNumber" in payload or "phone_number" in payload
+                else row["phone_number"]
+            )
             role = normalize_role(payload.get("role"), row["role"]) if "role" in payload else row["role"]
             status = (
                 normalize_user_status(payload.get("status"), row["status"])
@@ -698,6 +756,7 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                    SET display_name = ?,
                        email = ?,
                        job_title = ?,
+                       phone_number = ?,
                        role = ?,
                        status = ?,
                        updated_at = ?,
@@ -707,7 +766,18 @@ def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                        END
                  WHERE id = ?
                 """,
-                (display_name, email, job_title, role, status, now, status, now, user_id),
+                (
+                    display_name,
+                    email,
+                    job_title,
+                    phone_number,
+                    role,
+                    status,
+                    now,
+                    status,
+                    now,
+                    user_id,
+                ),
             )
             row = _fetch_user_by_id(conn, user_id)
 

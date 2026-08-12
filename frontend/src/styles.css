@@ -146,6 +146,19 @@ textarea {
   height: 46px;
 }
 
+.milestone-create-button {
+  height: 44px;
+  border-color: color-mix(in srgb, #7c3aed 52%, var(--border));
+  color: #6d28d9;
+  background: color-mix(in srgb, #7c3aed 7%, var(--surface));
+}
+
+.milestone-create-button:hover,
+.milestone-create-button:focus-visible {
+  border-color: #7c3aed !important;
+  color: #6d28d9 !important;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -180,6 +193,11 @@ textarea {
 
 .side-section .ant-list {
   margin-top: 8px;
+}
+
+.milestone-side-section .ant-list {
+  max-height: 210px;
+  overflow-y: auto;
 }
 
 .related-meeting-item {
@@ -401,6 +419,52 @@ textarea {
 
 .chip-repeat-icon {
   flex: 0 0 auto;
+}
+
+.milestone-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.milestone-chip {
+  grid-template-columns: 18px minmax(0, 1fr);
+  border-left: 3px solid currentColor;
+}
+
+.milestone-planned {
+  background: #f1eafe;
+  color: #6d28d9;
+}
+
+.milestone-in-progress {
+  background: #fff1df;
+  color: #b45309;
+}
+
+.milestone-completed {
+  background: #e8f7ef;
+  color: #18794e;
+}
+
+.inline-icon {
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+
+.milestone-description {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.milestone-description .ant-typography:last-child {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .status-scheduled {
@@ -684,6 +748,15 @@ textarea {
   justify-content: flex-end;
 }
 
+.directory-search {
+  margin-bottom: 16px;
+}
+
+.user-row-main .lucide-phone,
+.user-row-main .lucide-mail {
+  vertical-align: -2px;
+}
+
 .group-collapse-label {
   width: 100%;
   min-width: 0;
@@ -884,6 +957,21 @@ textarea {
 :root[data-theme="dark"] .status-cancelled {
   background: #3b2023;
   color: #ff9d98;
+}
+
+:root[data-theme="dark"] .milestone-planned {
+  background: #2d2148;
+  color: #c4a7ff;
+}
+
+:root[data-theme="dark"] .milestone-in-progress {
+  background: #3c2a17;
+  color: #fdba74;
+}
+
+:root[data-theme="dark"] .milestone-completed {
+  background: #173526;
+  color: #79d59e;
 }
 
 :root[data-theme="dark"] .password-line .copy-value {

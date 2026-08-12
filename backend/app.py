@@ -33,6 +33,7 @@ from auth import (
     reset_user_password,
     search_user_directory,
     update_user as update_system_user,
+    update_own_profile,
     update_own_preferences,
     change_own_password,
 )
@@ -48,6 +49,14 @@ from groups import (
     remove_group_member,
     update_group,
     update_group_member,
+)
+from milestones import (
+    MilestoneError,
+    create_milestone,
+    delete_milestone,
+    get_milestone,
+    list_milestones,
+    update_milestone,
 )
 from services import (
     MeetingError,
@@ -118,6 +127,10 @@ def create_app() -> Flask:
 
     @app.errorhandler(CalendarFeedError)
     def handle_calendar_feed_error(error: CalendarFeedError):
+        return jsonify({"message": str(error)}), error.status_code
+
+    @app.errorhandler(MilestoneError)
+    def handle_milestone_error(error: MilestoneError):
         return jsonify({"message": str(error)}), error.status_code
 
     @app.errorhandler(404)
@@ -199,6 +212,12 @@ def create_app() -> Flask:
     def auth_preferences_update():
         payload = request.get_json(silent=True) or {}
         return jsonify({"user": update_own_preferences(g.current_user["id"], payload)})
+
+    @app.patch("/api/auth/profile")
+    @login_required
+    def auth_profile_update():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"user": update_own_profile(g.current_user["id"], payload)})
     
     @app.post("/api/auth/change-password")
     @login_required
@@ -365,6 +384,33 @@ def create_app() -> Flask:
     @login_required
     def meetings_delete(meeting_id: int):
         return jsonify(delete_meeting(meeting_id, request.args.get("scope")))
+
+    @app.get("/api/milestones")
+    @login_required
+    def milestones_index():
+        return jsonify({"items": list_milestones(g.current_user, request.args.get("status"))})
+
+    @app.post("/api/milestones")
+    @login_required
+    def milestones_create():
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"milestone": create_milestone(payload, g.current_user)}), 201
+
+    @app.get("/api/milestones/<int:milestone_id>")
+    @login_required
+    def milestones_show(milestone_id: int):
+        return jsonify({"milestone": get_milestone(milestone_id, g.current_user)})
+
+    @app.patch("/api/milestones/<int:milestone_id>")
+    @login_required
+    def milestones_update(milestone_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"milestone": update_milestone(milestone_id, payload, g.current_user)})
+
+    @app.delete("/api/milestones/<int:milestone_id>")
+    @login_required
+    def milestones_delete(milestone_id: int):
+        return jsonify(delete_milestone(milestone_id, g.current_user))
 
     @app.get("/api/access-logs")
     @login_required
