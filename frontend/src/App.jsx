@@ -429,11 +429,13 @@ function MeetingFormModal({
       {
         value: "@all",
         label: t("@all（所有有效用户）"),
+        selectedLabel: "@all",
         allUsers: true,
       },
       ...groups.map((group) => ({
         value: group.selectionValue || `@group:${group.id}`,
         label: t("{{name}}（用户组）", { name: group.name }),
+        selectedLabel: group.name,
         groupId: group.id,
         groupName: group.name,
         memberCount: group.memberCount,
@@ -441,6 +443,7 @@ function MeetingFormModal({
       ...directoryUsers.map((user) => ({
         value: user.email,
         label: `${user.displayName} · ${user.email} · ${displayJobTitle(user)}`,
+        selectedLabel: user.displayName,
         displayName: user.displayName,
         username: user.username,
         email: user.email,
@@ -448,6 +451,13 @@ function MeetingFormModal({
       })),
     ],
     [directoryUsers, groups, language],
+  );
+  const attendeeSelectedLabels = useMemo(
+    () =>
+      new Map(
+        attendeeOptions.map((option) => [String(option.value), option.selectedLabel || option.label]),
+      ),
+    [attendeeOptions],
   );
   const legacyAttendees = useMemo(
     () => new Set((initialValues?.attendees || []).map((attendee) => String(attendee))),
@@ -591,6 +601,18 @@ function MeetingFormModal({
             }}
             loading={directoryLoading}
             notFoundContent={directoryLoading ? <Spin size="small" /> : t("未找到匹配用户，可直接输入邮箱")}
+            tagRender={({ label, value, closable, onClose }) => (
+              <Tag
+                closable={closable}
+                onClose={onClose}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+              >
+                {attendeeSelectedLabels.get(String(value)) || label}
+              </Tag>
+            )}
             optionRender={(option) =>
               option.data.allUsers ? (
                 <div className="attendee-option">
