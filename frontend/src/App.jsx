@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
   Collapse,
   ConfigProvider,
   Descriptions,
@@ -470,6 +471,15 @@ function formatCalendarRange(value, view, language) {
   const week = buildWeekDates(localizedValue);
   const start = week[0];
   const end = week[6];
+  if (language === "en-US") {
+    if (start.isSame(end, "month")) {
+      return `${start.format("MMM D")} – ${end.format("D, YYYY")}`;
+    }
+    if (start.isSame(end, "year")) {
+      return `${start.format("MMM D")} – ${end.format("MMM D, YYYY")}`;
+    }
+    return `${start.format("MMM D, YYYY")} – ${end.format("MMM D, YYYY")}`;
+  }
   if (start.isSame(end, "month")) {
     return `${start.format(t("YYYY年 M月D日"))} - ${end.format(t("D日"))}`;
   }
@@ -2601,6 +2611,11 @@ function ManagementApp({
   const [calendarSubscriptionLoading, setCalendarSubscriptionLoading] = useState(false);
   const [calendarValue, setCalendarValue] = useState(dayjs());
   const [calendarView, setCalendarView] = useState("week");
+  const [calendarFilters, setCalendarFilters] = useState({
+    showMeetings: true,
+    showMilestones: true,
+    hideCompletedMilestones: false,
+  });
   const [messageApi, contextHolder] = message.useMessage();
   const isAdmin = currentUser?.role === "admin";
 
@@ -3264,8 +3279,13 @@ function ManagementApp({
 
   const renderCalendarCell = (current) => {
     const key = current.format("YYYY-MM-DD");
-    const dayMeetings = meetingsByDate.get(key) || [];
-    const dayMilestones = milestonesByDate.get(key) || [];
+    const dayMeetings = calendarFilters.showMeetings ? meetingsByDate.get(key) || [] : [];
+    const dayMilestones = calendarFilters.showMilestones
+      ? (milestonesByDate.get(key) || []).filter(
+          (milestone) =>
+            !calendarFilters.hideCompletedMilestones || milestone.status !== "completed",
+        )
+      : [];
     const isOutsideMonth = calendarView === "month" && !current.isSame(calendarValue, "month");
     const isSelected = current.isSame(calendarValue, "day");
     const isToday = current.isSame(dayjs(), "day");
@@ -3557,6 +3577,44 @@ function ManagementApp({
                   { label: t("月"), value: "month" },
                 ]}
               />
+            </div>
+
+            <div className="calendar-filter-bar" aria-label={t("日历筛选")}>
+              <Text type="secondary" className="calendar-filter-label">{t("筛选")}</Text>
+              <Checkbox
+                checked={calendarFilters.showMeetings}
+                onChange={(event) =>
+                  setCalendarFilters((filters) => ({
+                    ...filters,
+                    showMeetings: event.target.checked,
+                  }))
+                }
+              >
+                {t("显示会议")}
+              </Checkbox>
+              <Checkbox
+                checked={calendarFilters.showMilestones}
+                onChange={(event) =>
+                  setCalendarFilters((filters) => ({
+                    ...filters,
+                    showMilestones: event.target.checked,
+                  }))
+                }
+              >
+                {t("显示里程碑")}
+              </Checkbox>
+              <Checkbox
+                checked={calendarFilters.hideCompletedMilestones}
+                disabled={!calendarFilters.showMilestones}
+                onChange={(event) =>
+                  setCalendarFilters((filters) => ({
+                    ...filters,
+                    hideCompletedMilestones: event.target.checked,
+                  }))
+                }
+              >
+                {t("屏蔽已完成的里程碑")}
+              </Checkbox>
             </div>
 
             <div className={`calendar-grid ${calendarView === "week" ? "is-week-view" : "is-month-view"}`}>

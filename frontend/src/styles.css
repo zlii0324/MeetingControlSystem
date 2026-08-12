@@ -267,6 +267,23 @@ textarea {
   font-size: 18px;
 }
 
+.calendar-filter-bar {
+  min-height: 46px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-muted);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.calendar-filter-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -677,6 +694,23 @@ textarea {
   flex: 0 0 auto;
 }
 
+html[lang="en"] .topbar {
+  align-items: flex-start !important;
+  flex-direction: column;
+  gap: 14px;
+}
+
+html[lang="en"] .topbar > div:first-child {
+  width: 100%;
+  min-width: 0;
+}
+
+html[lang="en"] .user-actions {
+  width: 100%;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
 .user-pill {
   min-width: 132px;
   padding: 7px 10px;
@@ -1058,6 +1092,14 @@ textarea {
 
   .calendar-range {
     text-align: left;
+  }
+
+  .calendar-filter-bar {
+    gap: 10px 16px;
+  }
+
+  .calendar-filter-label {
+    width: 100%;
   }
 
   .calendar-grid {
