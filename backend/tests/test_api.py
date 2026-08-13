@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
+import hashlib
+import hmac
+import json
 import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -18,6 +22,7 @@ APP_MODULES = [
     "config",
     "database",
     "auth",
+    "jitsi_auth",
     "mailer",
     "groups",
     "services",
@@ -40,6 +45,11 @@ def configure_test_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FRONTEND_ORIGIN", "http://localhost:5173")
     monkeypatch.setenv("MEETING_LINK_ORIGIN", "http://localhost:5173")
     monkeypatch.setenv("EMAIL_NOTIFICATIONS_ENABLED", "false")
+    # Keep the real backend/.env from leaking JWT settings into isolated tests.
+    monkeypatch.setenv("JITSI_JWT_APP_ID", "")
+    monkeypatch.setenv("JITSI_JWT_APP_SECRET", "")
+    monkeypatch.setenv("JITSI_JWT_SUBJECT", "meet.jitsi")
+    monkeypatch.setenv("JITSI_JWT_TTL_SECONDS", "7200")
 
 
 def create_logged_in_admin(test_client) -> None:
@@ -895,6 +905,128 @@ def test_create_meeting_defaults_to_no_password(client):
         json={"title": "主动移除自己", "hostName": "Admin", "attendees": []},
     ).get_json()
     assert explicitly_empty["attendees"] == []
+
+
+def test_jitsi_jwt_is_signed_for_only_the_verified_room(tmp_path, monkeypatch):
+    configure_test_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("JITSI_JWT_APP_ID", "meeting-control-test")
+    monkeypatch.setenv("JITSI_JWT_APP_SECRET", "jwt-test-secret")
+    monkeypatch.setenv("JITSI_JWT_SUBJECT", "meet.jitsi")
+    monkeypatch.setenv("JITSI_JWT_TTL_SECONDS", "900")
+    reset_app_modules()
+
+    from app import create_app
+
+    app = create_app()
+    app.config.update(TESTING=True)
+    with app.test_client() as test_client:
+        create_logged_in_admin(test_client)
+        created = test_client.post(
+            "/api/meetings",
+            json={
+                "title": "JWT 测试会议",
+                "hostName": "Admin",
+                "passwordRequired": True,
+            },
+        ).get_json()
+
+        assert created["meetingUrl"] == created["accessUrl"]
+        assert created["jitsiUrl"] is None
+
+        verified = test_client.post(
+            f"/api/public/meetings/{created['roomId']}/verify",
+            json={
+                "password": created["password"],
+                "displayName": "JWT Tester",
+                "email": "jwt-tester@example.test",
+            },
+        )
+
+        jitsi_url = verified.get_json()["jitsiUrl"]
+        parsed_url = urlsplit(jitsi_url)
+        token = parse_qs(parsed_url.query)["jwt"][0]
+
+        valid_token = test_client.get(
+            "/internal/jitsi/token/validate",
+            headers={"X-Jitsi-Token": token, "X-Jitsi-Room": created["roomId"]},
+        )
+        assert valid_token.status_code == 204
+
+        signature = token.split(".")[2]
+        tampered_index = len(signature) // 2
+        replacement = "A" if signature[tampered_index] != "A" else "B"
+        tampered_token = (
+            token[: token.rfind(".") + 1]
+            + signature[:tampered_index]
+            + replacement
+            + signature[tampered_index + 1 :]
+        )
+        invalid_token = test_client.get(
+            "/internal/jitsi/token/validate",
+            headers={
+                "X-Jitsi-Token": tampered_token,
+                "X-Jitsi-Room": created["roomId"],
+            },
+        )
+        assert invalid_token.status_code == 403
+
+        # A 32-byte HS256 signature has two unused bits in its final Base64URL
+        # character. Reject a non-canonical spelling even when it decodes to
+        # the same signature bytes.
+        base64url_alphabet = (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        )
+        final_index = base64url_alphabet.index(signature[-1])
+        alternate_signature = signature[:-1] + base64url_alphabet[final_index + 1]
+        assert base64.urlsafe_b64decode(
+            alternate_signature + "=" * (-len(alternate_signature) % 4)
+        ) == base64.urlsafe_b64decode(
+            signature + "=" * (-len(signature) % 4)
+        )
+        noncanonical_token = token[: token.rfind(".") + 1] + alternate_signature
+        noncanonical_response = test_client.get(
+            "/internal/jitsi/token/validate",
+            headers={
+                "X-Jitsi-Token": noncanonical_token,
+                "X-Jitsi-Room": created["roomId"],
+            },
+        )
+        assert noncanonical_response.status_code == 403
+
+        wrong_room = test_client.get(
+            "/internal/jitsi/token/validate",
+            headers={"X-Jitsi-Token": token, "X-Jitsi-Room": "another-room"},
+        )
+        assert wrong_room.status_code == 403
+
+    assert verified.status_code == 200
+    encoded_header, encoded_payload, encoded_signature = token.split(".")
+
+    def decode_segment(value: str) -> dict:
+        padded = value + "=" * (-len(value) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+
+    header = decode_segment(encoded_header)
+    payload = decode_segment(encoded_payload)
+    expected_signature = hmac.new(
+        b"jwt-test-secret",
+        f"{encoded_header}.{encoded_payload}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    actual_signature = base64.urlsafe_b64decode(
+        encoded_signature + "=" * (-len(encoded_signature) % 4)
+    )
+
+    assert parsed_url.path == f"/{created['roomId']}"
+    assert header == {"alg": "HS256", "typ": "JWT"}
+    assert hmac.compare_digest(actual_signature, expected_signature)
+    assert payload["aud"] == "meeting-control-test"
+    assert payload["iss"] == "meeting-control-test"
+    assert payload["sub"] == "meet.jitsi"
+    assert payload["room"] == created["roomId"]
+    assert payload["exp"] - payload["iat"] == 900
+    assert payload["context"]["user"]["name"] == "JWT Tester"
+    assert payload["context"]["user"]["email"] == "jwt-tester@example.test"
 
 
 def test_create_meeting_notifies_email_attendees_and_registered_users(client, monkeypatch):

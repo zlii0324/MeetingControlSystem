@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+from urllib.parse import quote, urlencode
 
 from auth import AuthError, create_admin_user, normalize_username, reset_user_password
 from database import init_db
+from config import config
+from jitsi_auth import JitsiJwtError, create_jitsi_token
 
 
 def prompt_required(label: str, default: str | None = None) -> str:
@@ -102,6 +105,25 @@ def reset_password(args: argparse.Namespace) -> int:
     return 0
 
 
+def generate_jitsi_token(args: argparse.Namespace) -> int:
+    room = args.room.strip()
+    try:
+        token = create_jitsi_token(
+            room,
+            display_name=args.display_name,
+            email=args.email,
+            user_id=args.user_id,
+        )
+    except JitsiJwtError as exc:
+        print(f"生成失败：{exc}", file=sys.stderr)
+        return 1
+
+    room_url = f"{config.normalized_jitsi_base_url}{quote(room, safe='')}"
+    print(f"JWT：{token}")
+    print(f"入会地址：{room_url}?{urlencode({'jwt': token})}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="会议管理系统维护命令")
     subparsers = parser.add_subparsers(dest="command")
@@ -123,6 +145,16 @@ def build_parser() -> argparse.ArgumentParser:
     reset_password_parser = subparsers.add_parser("reset-password", help="重置指定用户密码")
     reset_password_parser.add_argument("username", help="用户名")
     reset_password_parser.set_defaults(func=reset_password)
+
+    jitsi_token_parser = subparsers.add_parser(
+        "generate-jitsi-token",
+        help="生成仅允许进入指定房间的 Jitsi JWT",
+    )
+    jitsi_token_parser.add_argument("room", help="Jitsi 房间名")
+    jitsi_token_parser.add_argument("--display-name", help="写入 token 的参会者显示名称")
+    jitsi_token_parser.add_argument("--email", help="写入 token 的参会者邮箱")
+    jitsi_token_parser.add_argument("--user-id", help="写入 token 的业务用户 ID")
+    jitsi_token_parser.set_defaults(func=generate_jitsi_token)
 
     return parser
 

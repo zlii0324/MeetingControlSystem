@@ -1036,10 +1036,33 @@ function JoinPage({ roomId }) {
     };
   }, [roomId]);
 
+  useEffect(() => {
+    let active = true;
+
+    async function loadCurrentUserProfile() {
+      try {
+        const data = await fetchCurrentUser();
+        if (active && data.user) {
+          form.setFieldsValue({
+            displayName: data.user.displayName || "",
+            email: data.user.email || "",
+          });
+        }
+      } catch {
+        // Public invitees are not required to have an application account.
+      }
+    }
+
+    loadCurrentUserProfile();
+    return () => {
+      active = false;
+    };
+  }, [form]);
+
   const handleJoin = async (values) => {
     setVerifying(true);
     try {
-      const data = await verifyMeetingPassword(roomId, values.password);
+      const data = await verifyMeetingPassword(roomId, values);
       window.location.assign(data.jitsiUrl);
     } catch (error) {
       messageApi.error(error.message);
@@ -1076,8 +1099,22 @@ function JoinPage({ roomId }) {
               <Descriptions.Item label={t("结束时间")}>{displayTime(meeting.endTime)}</Descriptions.Item>
             </Descriptions>
 
-            {meeting.passwordRequired ? (
-              <Form form={form} layout="vertical" onFinish={handleJoin} className="join-form">
+            <Form form={form} layout="vertical" onFinish={handleJoin} className="join-form">
+              <Form.Item
+                label={t("姓名")}
+                name="displayName"
+                rules={[{ required: true, whitespace: true, message: t("请输入姓名") }]}
+              >
+                <Input autoComplete="name" maxLength={80} placeholder={t("请输入姓名")} />
+              </Form.Item>
+              <Form.Item
+                label={`${t("邮箱")} (${t("选填")})`}
+                name="email"
+                rules={[{ type: "email", message: t("邮箱格式无效") }]}
+              >
+                <Input type="email" autoComplete="email" maxLength={120} placeholder={t("请输入邮箱（选填）")} />
+              </Form.Item>
+              {meeting.passwordRequired && (
                 <Form.Item
                   label={t("会议密码")}
                   name="password"
@@ -1093,26 +1130,18 @@ function JoinPage({ roomId }) {
                     }}
                   />
                 </Form.Item>
-                <Button
-                  type="primary"
-                  size="large"
-                  htmlType="submit"
-                  block
-                  loading={verifying}
-                  icon={<LockKeyhole size={18} />}
-                >{t("验证并进入")}</Button>
-              </Form>
-            ) : (
+              )}
               <Button
                 type="primary"
                 size="large"
+                htmlType="submit"
                 block
-                href={meeting.jitsiUrl}
-                target="_blank"
-                rel="noreferrer"
-                icon={<ExternalLink size={18} />}
-              >{t("打开会议")}</Button>
-            )}
+                loading={verifying}
+                icon={meeting.passwordRequired ? <LockKeyhole size={18} /> : <ExternalLink size={18} />}
+              >
+                {meeting.passwordRequired ? t("验证并进入") : t("打开会议")}
+              </Button>
+            </Form>
           </Space>
         ) : null}
       </div>

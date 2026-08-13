@@ -39,6 +39,7 @@ from auth import (
 )
 from config import config
 from database import init_db
+from jitsi_auth import JitsiJwtError, verify_jitsi_token
 from groups import (
     GroupError,
     add_group_member,
@@ -148,8 +149,21 @@ def create_app() -> Flask:
             {
                 "status": "ok",
                 "jitsiBaseUrl": config.normalized_jitsi_base_url,
+                "jitsiJwtEnabled": config.jitsi_jwt_enabled,
             }
         )
+
+    @app.get("/internal/jitsi/token/validate")
+    def validate_jitsi_token():
+        try:
+            verify_jitsi_token(
+                request.headers.get("X-Jitsi-Token", ""),
+                request.headers.get("X-Jitsi-Room", ""),
+            )
+        except JitsiJwtError:
+            # Nginx converts this denial to a public 404 response.
+            return "", 403
+        return "", 204
 
     @app.post("/api/auth/register")
     def auth_register():
@@ -446,6 +460,8 @@ def create_app() -> Flask:
                 password=payload.get("password"),
                 ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
                 user_agent=request.headers.get("User-Agent"),
+                display_name=payload.get("displayName"),
+                email=payload.get("email"),
             )
         )
 

@@ -12,6 +12,7 @@ from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
 from database import get_connection, process_write_lock
 from groups import resolve_group_attendee_emails
+from jitsi_auth import create_jitsi_token
 from mailer import (
     normalize_email_address,
     send_meeting_cancellation_notifications,
@@ -358,6 +359,25 @@ def jitsi_url(room_id: str) -> str:
     return config.normalized_jitsi_base_url + room_id
 
 
+def jitsi_join_url(
+    room_id: str,
+    *,
+    display_name: str | None = None,
+    email: str | None = None,
+    user_id: str | int | None = None,
+) -> str:
+    url = jitsi_url(room_id)
+    if not config.jitsi_jwt_enabled:
+        return url
+    token = create_jitsi_token(
+        room_id,
+        display_name=display_name,
+        email=email,
+        user_id=user_id,
+    )
+    return f"{url}?jwt={token}"
+
+
 def access_url(room_id: str) -> str:
     base_url = config.meeting_link_origin.strip()
     if base_url:
@@ -366,7 +386,7 @@ def access_url(room_id: str) -> str:
 
 
 def meeting_url(room_id: str, password_required: bool = False) -> str:
-    if password_required:
+    if password_required or config.jitsi_jwt_enabled:
         return access_url(room_id)
     return jitsi_url(room_id)
 
@@ -391,6 +411,7 @@ def effective_status(meeting: dict[str, Any]) -> str:
 
 def public_meeting(meeting: dict[str, Any], include_password: str | None = None) -> dict[str, Any]:
     password_required = is_password_required(meeting)
+    join_verification_required = password_required or config.jitsi_jwt_enabled
     room_id = meeting["room_id"]
     data = {
         "id": meeting["id"],
@@ -405,7 +426,7 @@ def public_meeting(meeting: dict[str, Any], include_password: str | None = None)
         "maxOccupants": meeting["max_occupants"],
         "passwordRequired": password_required,
         "accessUrl": access_url(room_id),
-        "jitsiUrl": None if password_required else jitsi_url(room_id),
+        "jitsiUrl": None if join_verification_required else jitsi_url(room_id),
         "meetingUrl": meeting_url(room_id, password_required),
         "createdAt": meeting["created_at"],
         "updatedAt": meeting["updated_at"],
@@ -1150,7 +1171,7 @@ def public_join_meeting(room_id: str) -> dict[str, Any]:
         "status": effective_status(meeting),
         "passwordRequired": password_required,
     }
-    if not password_required:
+    if not password_required and not config.jitsi_jwt_enabled:
         payload["jitsiUrl"] = jitsi_url(meeting["room_id"])
     return payload
 
@@ -1161,6 +1182,8 @@ def verify_join_password(
     password: str | None,
     ip_address: str | None,
     user_agent: str | None,
+    display_name: str | None = None,
+    email: str | None = None,
 ) -> dict[str, Any]:
     room_id = room_id.strip()
     meeting = get_meeting_by_room(room_id)
@@ -1177,14 +1200,26 @@ def verify_join_password(
 
     if not is_password_required(meeting):
         log_access(room_id, meeting["id"], ip_address, user_agent, True)
-        return {"jitsiUrl": jitsi_url(meeting["room_id"])}
+        return {
+            "jitsiUrl": jitsi_join_url(
+                meeting["room_id"],
+                display_name=display_name,
+                email=email,
+            )
+        }
 
     if not password or not verify_password(str(password), meeting["password_hash"]):
         log_access(room_id, meeting["id"], ip_address, user_agent, False, "密码错误")
         raise MeetingError("密码错误", 403)
 
     log_access(room_id, meeting["id"], ip_address, user_agent, True)
-    return {"jitsiUrl": jitsi_url(meeting["room_id"])}
+    return {
+        "jitsiUrl": jitsi_join_url(
+            meeting["room_id"],
+            display_name=display_name,
+            email=email,
+        )
+    }
 
 
 @with_process_write_lock

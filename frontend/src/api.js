@@ -296,9 +296,13 @@ export function fetchPublicMeeting(roomId) {
   return request(`/api/public/meetings/${encodeURIComponent(roomId)}`);
 }
 
-export function verifyMeetingPassword(roomId, password) {
+export function verifyMeetingPassword(roomId, values = {}) {
   return request(`/api/public/meetings/${encodeURIComponent(roomId)}/verify`, {
     method: "POST",
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({
+      password: values.password,
+      displayName: values.displayName,
+      email: values.email,
+    }),
   });
 }

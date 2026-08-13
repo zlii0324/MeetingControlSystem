@@ -72,6 +72,10 @@ class Config:
         str(INSTANCE_DIR / "meetings.sqlite3"),
     )
     jitsi_base_url: str = _as_str("JITSI_BASE_URL", "https://meet.wusupower.com/")
+    jitsi_jwt_app_id: str = _as_str("JITSI_JWT_APP_ID")
+    jitsi_jwt_app_secret: str = _as_str("JITSI_JWT_APP_SECRET")
+    jitsi_jwt_subject: str = _as_str("JITSI_JWT_SUBJECT", "meet.jitsi")
+    jitsi_jwt_ttl_seconds: int = _as_int("JITSI_JWT_TTL_SECONDS", 7200)
     room_prefix: str = _as_str("ROOM_PREFIX", "mcs")
     frontend_origins: tuple[str, ...] = _as_origin_list("FRONTEND_ORIGIN")
     meeting_link_origin: str = _as_str(
@@ -109,9 +113,22 @@ class Config:
     password_reset_token_ttl_minutes: int = _as_int("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30)
     password_reset_cooldown_seconds: int = _as_int("PASSWORD_RESET_COOLDOWN_SECONDS", 60)
 
+    def __post_init__(self) -> None:
+        jwt_values = (self.jitsi_jwt_app_id, self.jitsi_jwt_app_secret)
+        if any(jwt_values) and not all(jwt_values):
+            raise ValueError(
+                "JITSI_JWT_APP_ID and JITSI_JWT_APP_SECRET must be configured together"
+            )
+        if self.jitsi_jwt_ttl_seconds <= 0:
+            raise ValueError("JITSI_JWT_TTL_SECONDS must be greater than zero")
+
     @property
     def normalized_jitsi_base_url(self) -> str:
         return self.jitsi_base_url.rstrip("/") + "/"
+
+    @property
+    def jitsi_jwt_enabled(self) -> bool:
+        return bool(self.jitsi_jwt_app_id and self.jitsi_jwt_app_secret)
 
     @property
     def frontend_origin(self) -> str:

@@ -23,46 +23,7 @@ https://meet.wusupower.com/
 
 ## 快速启动
 
-支持 Linux、Windows 和 macOS。建议使用 Python 3.11+、Node.js 20+，或直接使用 Docker Desktop。
-
-### Docker 三服务测试环境
-
-已提供一套仅绑定本机的测试环境，包含应用服务器、Mailpit 测试邮件服务器和官方 Jitsi 组件。先启动 Docker Desktop，然后运行：
-
-Linux / macOS：
-
-```bash
-./scripts/start-test-stack.sh
-./scripts/smoke-test-stack.py
-```
-
-Windows PowerShell：
-
-```powershell
-.\scripts\start-test-stack.ps1
-py .\scripts\smoke-test-stack.py
-```
-
-访问入口：
-
-- 应用：<http://localhost:8080>
-- 测试邮件收件箱：<http://localhost:8025>
-- Jitsi：<http://localhost:8000>
-- 测试管理员：`admin@example.test` / `TestAdmin123`
-
-Jitsi 测试入口使用仅绑定本机的 HTTP，因此不需要安装测试证书。邮件只会被 Mailpit 捕获，不会发到公网。这套配置关闭了 Jitsi 登录并使用固定测试密码，只适合本机开发测试，不能直接作为生产配置；生产环境必须使用正式域名和 HTTPS。
-
-停止服务但保留测试数据库：
-
-```bash
-docker compose -f compose.test.yml down
-```
-
-停止服务并清空全部 Docker 测试数据：
-
-```bash
-docker compose -f compose.test.yml down --volumes
-```
+支持 Linux、Windows 和 macOS。建议使用 Python 3.11+ 和 Node.js 20+。
 
 ### 后端
 
