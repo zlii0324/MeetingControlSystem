@@ -148,15 +148,16 @@ textarea {
 
 .milestone-create-button {
   height: 44px;
-  border-color: color-mix(in srgb, #7c3aed 52%, var(--border));
-  color: #6d28d9;
-  background: color-mix(in srgb, #7c3aed 7%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  color: var(--accent);
+  background: transparent;
 }
 
 .milestone-create-button:hover,
 .milestone-create-button:focus-visible {
-  border-color: #7c3aed !important;
-  color: #6d28d9 !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: transparent !important;
 }
 
 .summary-grid {
@@ -229,6 +230,29 @@ textarea {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.milestone-list-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  outline: none;
+}
+
+.milestone-pin-button.ant-btn {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  opacity: 0.58;
+}
+
+.milestone-list-item:hover .milestone-pin-button,
+.milestone-pin-button.ant-btn:focus-visible,
+.milestone-pin-button.ant-btn.is-pinned {
+  opacity: 1;
+}
+
+.milestone-pin-button.ant-btn.is-pinned {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .calendar-panel {
@@ -452,18 +476,73 @@ textarea {
 }
 
 .milestone-planned {
-  background: #f1eafe;
-  color: #6d28d9;
+  --milestone-status-bg: #eaf2ff;
+  --milestone-status-color: #1d4ed8;
+  background: var(--milestone-status-bg);
+  color: var(--milestone-status-color);
 }
 
 .milestone-in-progress {
-  background: #fff1df;
-  color: #b45309;
+  --milestone-status-bg: #fff7cc;
+  --milestone-status-color: #8a5a00;
+  background: var(--milestone-status-bg);
+  color: var(--milestone-status-color);
 }
 
 .milestone-completed {
-  background: #e8f7ef;
-  color: #18794e;
+  --milestone-status-bg: #e8f7ef;
+  --milestone-status-color: #18794e;
+  background: var(--milestone-status-bg);
+  color: var(--milestone-status-color);
+}
+
+.milestone-overdue {
+  --milestone-status-bg: #fde8e7;
+  --milestone-status-color: #c2413a;
+  background: var(--milestone-status-bg);
+  color: var(--milestone-status-color);
+}
+
+.milestone-status-trigger.ant-btn {
+  min-width: 66px;
+  padding-inline: 9px;
+  border-color: color-mix(in srgb, currentColor 34%, transparent);
+  color: var(--milestone-status-color);
+  background: var(--milestone-status-bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.milestone-status-trigger.ant-btn:hover,
+.milestone-status-trigger.ant-btn:focus-visible {
+  border-color: currentColor !important;
+  color: var(--milestone-status-color) !important;
+  background: var(--milestone-status-bg) !important;
+}
+
+.milestone-title-row {
+  display: flex;
+  align-items: center;
+}
+
+.milestone-title-row .drawer-title.ant-typography {
+  margin: 0 !important;
+  line-height: 1.25;
+}
+
+.milestone-title-row .milestone-status-trigger,
+.milestone-title-row .ant-tag {
+  margin: 0;
+  align-self: center;
+}
+
+.milestone-reschedule-field {
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .inline-icon {
@@ -692,23 +771,10 @@ textarea {
 
 .user-actions {
   flex: 0 0 auto;
-}
-
-html[lang="en"] .topbar {
-  align-items: flex-start !important;
-  flex-direction: column;
-  gap: 14px;
-}
-
-html[lang="en"] .topbar > div:first-child {
-  width: 100%;
-  min-width: 0;
-}
-
-html[lang="en"] .user-actions {
-  width: 100%;
-  flex: 1 1 auto;
-  justify-content: flex-end;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .user-pill {
@@ -720,6 +786,20 @@ html[lang="en"] .user-actions {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.account-menu-button {
+  width: 40px;
+  height: 40px;
+}
+
+.preferences-popover-anchor {
+  position: absolute;
+  right: 20px;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .user-pill .ant-typography {
@@ -996,18 +1076,23 @@ html[lang="en"] .user-actions {
 }
 
 :root[data-theme="dark"] .milestone-planned {
-  background: #2d2148;
-  color: #c4a7ff;
+  --milestone-status-bg: #172a4d;
+  --milestone-status-color: #8eb8ff;
 }
 
 :root[data-theme="dark"] .milestone-in-progress {
-  background: #3c2a17;
-  color: #fdba74;
+  --milestone-status-bg: #3b3215;
+  --milestone-status-color: #facc15;
 }
 
 :root[data-theme="dark"] .milestone-completed {
-  background: #173526;
-  color: #79d59e;
+  --milestone-status-bg: #173526;
+  --milestone-status-color: #79d59e;
+}
+
+:root[data-theme="dark"] .milestone-overdue {
+  --milestone-status-bg: #3b2023;
+  --milestone-status-color: #ff9d98;
 }
 
 :root[data-theme="dark"] .password-line .copy-value {
@@ -1055,8 +1140,17 @@ html[lang="en"] .user-actions {
   }
 
   .user-actions,
-  .user-pill {
+  .topbar > div:first-child {
     width: 100%;
+  }
+
+  .user-actions {
+    flex-wrap: nowrap;
+  }
+
+  .user-pill {
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
   .review-line {

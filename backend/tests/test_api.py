@@ -185,7 +185,7 @@ def test_regular_user_can_view_active_directory_sorted_by_name_pinyin(client):
     assert [item["displayName"] for item in phone_search] == ["王五"]
 
 
-def test_meeting_link_uses_pinyin_title_and_start_time(client):
+def test_meeting_link_uses_random_room_id_without_title_or_time(client):
     response = client.post(
         "/api/meetings",
         json={
@@ -198,13 +198,17 @@ def test_meeting_link_uses_pinyin_title_and_start_time(client):
 
     assert response.status_code == 201
     created = response.get_json()
-    assert created["roomId"] == "xiang-mu-tong-bu-20482004-17-55"
-    assert created["meetingUrl"] == (
-        "https://meet.wusupower.com/xiang-mu-tong-bu-20482004-17-55"
-    )
+    assert re.fullmatch(r"mcs-[0-9a-f]{12}", created["roomId"])
+    assert "xiang-mu-tong-bu" not in created["roomId"]
+    assert "2048" not in created["roomId"]
+    assert created["meetingUrl"] == f"https://meet.wusupower.com/{created['roomId']}"
 
 
-def test_duplicate_meaningful_meeting_links_get_a_numeric_suffix(client):
+def test_duplicate_random_room_ids_are_regenerated(client, monkeypatch):
+    import services
+
+    room_ids = iter(["mcs-fixed000001", "mcs-fixed000001", "mcs-next0000002"])
+    monkeypatch.setattr(services, "generate_room_id", lambda: next(room_ids))
     payload = {
         "title": "项目同步",
         "hostName": "Alice",
@@ -215,8 +219,8 @@ def test_duplicate_meaningful_meeting_links_get_a_numeric_suffix(client):
     first = client.post("/api/meetings", json=payload).get_json()
     second = client.post("/api/meetings", json=payload).get_json()
 
-    assert first["roomId"] == "xiang-mu-tong-bu-20482004-17-55"
-    assert second["roomId"] == "xiang-mu-tong-bu-20482004-17-55-2"
+    assert first["roomId"] == "mcs-fixed000001"
+    assert second["roomId"] == "mcs-next0000002"
 
 
 def test_user_group_visibility_and_member_permissions(client):
@@ -2124,3 +2128,72 @@ def test_milestones_are_filtered_by_related_user_creator_and_global_scope(client
     assert bob_owned["id"] not in {
         item["id"] for item in client.get("/api/milestones").get_json()["items"]
     }
+
+
+def test_milestone_pins_are_private_to_each_visible_user(client):
+    bob_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "pin-bob",
+            "displayName": "Pin Bob",
+            "email": "pin-bob@example.com",
+            "password": "PinBobPass123",
+            "role": "scheduler",
+            "status": "active",
+        },
+    )
+    assert bob_response.status_code == 201
+
+    milestone = client.post(
+        "/api/milestones",
+        json={"title": "共享置顶测试", "dueDate": "2048-07-01", "isGlobal": True},
+    ).get_json()["milestone"]
+    assert milestone["isPinned"] is False
+
+    invalid_pin = client.patch(f"/api/milestones/{milestone['id']}/pin", json={"pinned": "yes"})
+    assert invalid_pin.status_code == 400
+
+    admin_pin = client.patch(
+        f"/api/milestones/{milestone['id']}/pin",
+        json={"pinned": True},
+    )
+    assert admin_pin.status_code == 200
+    assert admin_pin.get_json()["milestone"]["isPinned"] is True
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "pin-bob", "password": "PinBobPass123"},
+    ).status_code == 200
+    bob_milestone = next(
+        item
+        for item in client.get("/api/milestones").get_json()["items"]
+        if item["id"] == milestone["id"]
+    )
+    assert bob_milestone["isPinned"] is False
+    assert client.patch(
+        f"/api/milestones/{milestone['id']}/pin",
+        json={"pinned": True},
+    ).get_json()["milestone"]["isPinned"] is True
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "admin", "password": ADMIN_PASSWORD},
+    ).status_code == 200
+    assert client.patch(
+        f"/api/milestones/{milestone['id']}/pin",
+        json={"pinned": False},
+    ).get_json()["milestone"]["isPinned"] is False
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"account": "pin-bob", "password": "PinBobPass123"},
+    ).status_code == 200
+    bob_milestone = next(
+        item
+        for item in client.get("/api/milestones").get_json()["items"]
+        if item["id"] == milestone["id"]
+    )
+    assert bob_milestone["isPinned"] is True

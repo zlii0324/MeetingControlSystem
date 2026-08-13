@@ -251,6 +251,13 @@ export function updateMilestone(id, values) {
   });
 }
 
+export function updateMilestonePin(id, pinned) {
+  return request(`/api/milestones/${id}/pin`, {
+    method: "PATCH",
+    body: JSON.stringify({ pinned }),
+  });
+}
+
 export function deleteMilestone(id) {
   return request(`/api/milestones/${id}`, {
     method: "DELETE",

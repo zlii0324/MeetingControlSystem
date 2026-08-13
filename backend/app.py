@@ -57,6 +57,7 @@ from milestones import (
     get_milestone,
     list_milestones,
     update_milestone,
+    update_milestone_pin,
 )
 from services import (
     MeetingError,
@@ -406,6 +407,20 @@ def create_app() -> Flask:
     def milestones_update(milestone_id: int):
         payload = request.get_json(silent=True) or {}
         return jsonify({"milestone": update_milestone(milestone_id, payload, g.current_user)})
+
+    @app.patch("/api/milestones/<int:milestone_id>/pin")
+    @login_required
+    def milestones_pin_update(milestone_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            {
+                "milestone": update_milestone_pin(
+                    milestone_id,
+                    payload.get("pinned"),
+                    g.current_user,
+                )
+            }
+        )
 
     @app.delete("/api/milestones/<int:milestone_id>")
     @login_required

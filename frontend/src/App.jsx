@@ -7,6 +7,7 @@ import {
   ConfigProvider,
   Descriptions,
   Drawer,
+  Dropdown,
   Empty,
   Flex,
   Form,
@@ -34,6 +35,7 @@ import {
   CalendarClock,
   CalendarPlus,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clipboard,
@@ -46,10 +48,12 @@ import {
   LogOut,
   LockKeyhole,
   Mail,
+  Menu,
   Monitor,
   Moon,
   Palette,
   Phone,
+  Pin,
   Plus,
   RefreshCw,
   Repeat2,
@@ -100,6 +104,7 @@ import {
   updateGroupMember,
   updateMeeting,
   updateMilestone,
+  updateMilestonePin,
   verifyMeetingPassword,
   changePassword,
 } from "./api";
@@ -132,9 +137,22 @@ const statusMap = {
 
 const milestoneStatusMap = {
   planned: { text: "计划", color: "blue", className: "milestone-planned" },
-  in_progress: { text: "进行中", color: "orange", className: "milestone-in-progress" },
+  in_progress: { text: "进行中", color: "gold", className: "milestone-in-progress" },
   completed: { text: "已完成", color: "green", className: "milestone-completed" },
+  overdue: { text: "已逾期", color: "red", className: "milestone-overdue" },
 };
+const editableMilestoneStatuses = ["planned", "in_progress", "completed"];
+
+function getMilestoneDisplayStatus(milestone) {
+  if (
+    milestone?.status !== "completed" &&
+    milestone?.dueDate &&
+    dayjs(milestone.dueDate).isBefore(dayjs(), "day")
+  ) {
+    return "overdue";
+  }
+  return milestone?.status || "planned";
+}
 
 const recurrenceTypeOptions = [
   { label: "每周", value: "weekly" },
@@ -2161,8 +2179,10 @@ function PreferencesPopover({
   emailNotificationsEnabled,
   emailPreferenceSaving,
   onEmailNotificationsChange,
+  open,
+  onOpenChange,
+  children,
 }) {
-  const [open, setOpen] = useState(false);
   const [customColorInput, setCustomColorInput] = useState(customThemeColor || "");
   const normalizedCustomColor = customColorInput.trim().toLowerCase();
   const customColorValid = /^#[0-9a-f]{6}$/.test(normalizedCustomColor);
@@ -2316,9 +2336,9 @@ function PreferencesPopover({
       trigger="click"
       placement="bottomRight"
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={onOpenChange}
     >
-      <Button icon={<Palette size={16} />}>{t("首选项")}</Button>
+      {children}
     </Popover>
   );
 }
@@ -2493,9 +2513,9 @@ function MilestoneFormModal({
             rules={[{ required: true, message: t("请选择状态") }]}
           >
             <Select
-              options={Object.entries(milestoneStatusMap).map(([value, config]) => ({
+              options={editableMilestoneStatuses.map((value) => ({
                 value,
-                label: t(config.text),
+                label: t(milestoneStatusMap[value].text),
               }))}
             />
           </Form.Item>
@@ -2585,6 +2605,8 @@ function ManagementApp({
   const [profileSaving, setProfileSaving] = useState(false);
   const [emailPreferenceSaving, setEmailPreferenceSaving] = useState(false);
   const [customThemeSaving, setCustomThemeSaving] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [groupDrawerOpen, setGroupDrawerOpen] = useState(false);
   const [directoryDrawerOpen, setDirectoryDrawerOpen] = useState(false);
   const [groupFormOpen, setGroupFormOpen] = useState(false);
@@ -2606,6 +2628,11 @@ function ManagementApp({
   const [milestoneFormMode, setMilestoneFormMode] = useState("create");
   const [selectedMilestone, setSelectedMilestone] = useState(null);
   const [milestoneSaving, setMilestoneSaving] = useState(false);
+  const [milestoneStatusSavingId, setMilestoneStatusSavingId] = useState(null);
+  const [milestonePinSavingId, setMilestonePinSavingId] = useState(null);
+  const [milestoneRescheduleOpen, setMilestoneRescheduleOpen] = useState(false);
+  const [milestoneRescheduleDate, setMilestoneRescheduleDate] = useState(null);
+  const [milestoneRescheduling, setMilestoneRescheduling] = useState(false);
   const [calendarSubscriptionOpen, setCalendarSubscriptionOpen] = useState(false);
   const [calendarSubscription, setCalendarSubscription] = useState(null);
   const [calendarSubscriptionLoading, setCalendarSubscriptionLoading] = useState(false);
@@ -3069,6 +3096,23 @@ function ManagementApp({
     [milestones],
   );
 
+  const visibleRelatedMilestones = useMemo(
+    () => {
+      const filteredMilestones = calendarFilters.hideCompletedMilestones
+        ? relatedMilestones.filter((milestone) => milestone.status !== "completed")
+        : relatedMilestones;
+      return [...filteredMilestones].sort((a, b) => {
+        const pinnedOrder = Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned));
+        if (pinnedOrder) return pinnedOrder;
+        const overdueOrder =
+          Number(getMilestoneDisplayStatus(b) === "overdue") -
+          Number(getMilestoneDisplayStatus(a) === "overdue");
+        return overdueOrder;
+      });
+    },
+    [calendarFilters.hideCompletedMilestones, relatedMilestones],
+  );
+
   const milestonesByDate = useMemo(() => {
     const grouped = new Map();
     relatedMilestones.forEach((milestone) => {
@@ -3088,6 +3132,7 @@ function ManagementApp({
     if (!selectedMilestone) return null;
     return milestones.find((milestone) => milestone.id === selectedMilestone.id) || null;
   }, [milestones, selectedMilestone]);
+  const selectedMilestoneDisplayStatus = getMilestoneDisplayStatus(selectedMilestoneFresh);
 
   const summary = useMemo(
     () => ({
@@ -3144,6 +3189,11 @@ function ManagementApp({
     setMilestoneFormOpen(true);
   };
 
+  const openMilestoneReschedule = (milestone) => {
+    setMilestoneRescheduleDate(dayjs(milestone.dueDate));
+    setMilestoneRescheduleOpen(true);
+  };
+
   const handleMilestoneSubmit = async (payload) => {
     setMilestoneSaving(true);
     try {
@@ -3164,6 +3214,62 @@ function ManagementApp({
       messageApi.error(error.message);
     } finally {
       setMilestoneSaving(false);
+    }
+  };
+
+  const handleMilestoneStatusChange = async (milestone, status) => {
+    if (!milestone?.canEdit || milestone.status === status) return;
+    setMilestoneStatusSavingId(milestone.id);
+    try {
+      const data = await updateMilestone(milestone.id, { status });
+      setMilestones((items) =>
+        items.map((item) => (item.id === data.milestone.id ? data.milestone : item)),
+      );
+      setSelectedMilestone(data.milestone);
+      messageApi.success(t("里程碑状态已更新"));
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setMilestoneStatusSavingId(null);
+    }
+  };
+
+  const handleMilestonePinChange = async (milestone) => {
+    if (milestonePinSavingId === milestone.id) return;
+    setMilestonePinSavingId(milestone.id);
+    try {
+      const data = await updateMilestonePin(milestone.id, !milestone.isPinned);
+      setMilestones((items) =>
+        items.map((item) => (item.id === data.milestone.id ? data.milestone : item)),
+      );
+      if (selectedMilestone?.id === data.milestone.id) {
+        setSelectedMilestone(data.milestone);
+      }
+      messageApi.success(t(data.milestone.isPinned ? "里程碑已置顶" : "已取消置顶"));
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setMilestonePinSavingId(null);
+    }
+  };
+
+  const handleMilestoneReschedule = async () => {
+    if (!selectedMilestoneFresh?.canEdit || !milestoneRescheduleDate) return;
+    setMilestoneRescheduling(true);
+    try {
+      const data = await updateMilestone(selectedMilestoneFresh.id, {
+        dueDate: milestoneRescheduleDate.format("YYYY-MM-DD"),
+      });
+      setMilestones((items) =>
+        items.map((item) => (item.id === data.milestone.id ? data.milestone : item)),
+      );
+      setSelectedMilestone(data.milestone);
+      setMilestoneRescheduleOpen(false);
+      messageApi.success(t("里程碑日期已更新"));
+    } catch (error) {
+      messageApi.error(error.message);
+    } finally {
+      setMilestoneRescheduling(false);
     }
   };
 
@@ -3259,6 +3365,33 @@ function ManagementApp({
     }
   };
 
+  const handleAccountMenuClick = ({ key }) => {
+    setAccountMenuOpen(false);
+    if (key === "preferences") {
+      setPreferencesOpen(true);
+    } else if (key === "profile") {
+      setProfileModalOpen(true);
+    } else if (key === "calendar-subscription") {
+      openCalendarSubscription();
+    } else if (key === "directory") {
+      setDirectoryDrawerOpen(true);
+    } else if (key === "groups") {
+      setGroupDrawerOpen(true);
+    } else if (key === "logout") {
+      handleLogout();
+    }
+  };
+
+  const accountMenuItems = [
+    { key: "preferences", icon: <Palette size={16} />, label: t("首选项") },
+    { key: "profile", icon: <UserCheck size={16} />, label: t("修改个人资料") },
+    { key: "calendar-subscription", icon: <CalendarPlus size={16} />, label: t("订阅日历") },
+    { key: "directory", icon: <Users size={16} />, label: t("人员信息") },
+    { key: "groups", icon: <Users size={16} />, label: t("用户组") },
+    { type: "divider" },
+    { key: "logout", icon: <LogOut size={16} />, label: t("退出"), danger: true, disabled: loggingOut },
+  ];
+
   const copyText = async (text) => {
     try {
       await writeClipboardText(text);
@@ -3337,7 +3470,8 @@ function ManagementApp({
             );
           })}
           {dayMilestones.map((milestone) => {
-            const status = milestoneStatusMap[milestone.status] || milestoneStatusMap.planned;
+            const status =
+              milestoneStatusMap[getMilestoneDisplayStatus(milestone)] || milestoneStatusMap.planned;
             return (
               <button
                 key={`milestone-${milestone.id}`}
@@ -3442,43 +3576,58 @@ function ManagementApp({
         <section className="side-section milestone-side-section">
           <Flex align="center" justify="space-between">
             <Text strong>{t("我的里程碑")}</Text>
-            <Tag color="purple">{relatedMilestones.length}</Tag>
+            <Tag color="purple">{visibleRelatedMilestones.length}</Tag>
           </Flex>
           <List
             size="small"
-            dataSource={relatedMilestones}
+            dataSource={visibleRelatedMilestones}
             locale={{
               emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("暂无相关里程碑")} />,
             }}
             renderItem={(milestone) => {
-              const status = milestoneStatusMap[milestone.status] || milestoneStatusMap.planned;
+              const status =
+                milestoneStatusMap[getMilestoneDisplayStatus(milestone)] || milestoneStatusMap.planned;
               return (
                 <List.Item
                   className="related-meeting-item milestone-list-item"
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => showMilestone(milestone)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      showMilestone(milestone);
-                    }
-                  }}
                 >
-                  <div className="related-meeting-line">
-                    <Badge color={status.color} />
-                    <div>
-                      <Text>
-                        {milestone.isGlobal && <Globe2 size={13} className="inline-icon" />}
-                        {milestone.title}
-                      </Text>
-                      <Text type="secondary">
-                        {t("截止 {{date}}", {
-                          date: dayjs(milestone.dueDate).format(t("YYYY年 M月D日")),
-                        })}
-                      </Text>
+                  <div
+                    className="milestone-list-main"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => showMilestone(milestone)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        showMilestone(milestone);
+                      }
+                    }}
+                  >
+                    <div className="related-meeting-line">
+                      <Badge color={status.color} />
+                      <div>
+                        <Text>
+                          {milestone.isGlobal && <Globe2 size={13} className="inline-icon" />}
+                          {milestone.title}
+                        </Text>
+                        <Text type="secondary">
+                          {t("截止 {{date}}", {
+                            date: dayjs(milestone.dueDate).format(t("YYYY年 M月D日")),
+                          })}
+                        </Text>
+                      </div>
                     </div>
                   </div>
+                  <Button
+                    type="text"
+                    size="small"
+                    loading={milestonePinSavingId === milestone.id}
+                    className={`milestone-pin-button ${milestone.isPinned ? "is-pinned" : ""}`}
+                    icon={<Pin size={15} fill={milestone.isPinned ? "currentColor" : "none"} />}
+                    aria-label={t(milestone.isPinned ? "取消置顶" : "置顶里程碑")}
+                    title={t(milestone.isPinned ? "取消置顶" : "置顶里程碑")}
+                    onClick={() => handleMilestonePinChange(milestone)}
+                  />
                 </List.Item>
               );
             }}
@@ -3528,11 +3677,28 @@ function ManagementApp({
             <Title level={2}>{t("会议日历")}</Title>
             <Text type="secondary">{t("点击会议或里程碑卡片查看详情")}</Text>
           </div>
-          <Space size={12} wrap className="user-actions">
+          <div className="user-actions">
             <div className="user-pill">
               <Text strong>{currentUser.displayName}</Text>
               <Text type="secondary">{displayJobTitle(currentUser, true)}</Text>
             </div>
+            <Dropdown
+              open={accountMenuOpen}
+              onOpenChange={(nextOpen) => {
+                setAccountMenuOpen(nextOpen);
+                if (nextOpen) setPreferencesOpen(false);
+              }}
+              menu={{ items: accountMenuItems, onClick: handleAccountMenuClick }}
+              trigger={["click"]}
+              placement="bottomRight"
+            >
+              <Button
+                className="account-menu-button"
+                icon={<Menu size={20} />}
+                aria-label={t("用户菜单")}
+                title={t("用户菜单")}
+              />
+            </Dropdown>
             <PreferencesPopover
               preferences={preferences}
               onChange={onPreferenceChange}
@@ -3543,19 +3709,12 @@ function ManagementApp({
               emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
               emailPreferenceSaving={emailPreferenceSaving}
               onEmailNotificationsChange={handleEmailNotificationsChange}
-            />
-            <Button icon={<UserCheck size={16} />} onClick={() => setProfileModalOpen(true)}>
-              {t("修改个人资料")}
-            </Button>
-            <Button icon={<CalendarPlus size={16} />} onClick={openCalendarSubscription}>
-              {t("订阅日历")}
-            </Button>
-            <Button icon={<Users size={16} />} onClick={() => setDirectoryDrawerOpen(true)}>
-              {t("人员信息")}
-            </Button>
-            <Button icon={<Users size={16} />} onClick={() => setGroupDrawerOpen(true)}>{t("用户组")}</Button>
-            <Button icon={<LogOut size={16} />} loading={loggingOut} onClick={handleLogout}>{t("退出")}</Button>
-          </Space>
+              open={preferencesOpen}
+              onOpenChange={setPreferencesOpen}
+            >
+              <span className="preferences-popover-anchor" aria-hidden="true" />
+            </PreferencesPopover>
+          </div>
         </Flex>
 
         <Spin spinning={loading}>
@@ -3638,6 +3797,12 @@ function ManagementApp({
           selectedMilestoneFresh?.canEdit && (
             <Space>
               <Button
+                icon={<CalendarClock size={16} />}
+                onClick={() => openMilestoneReschedule(selectedMilestoneFresh)}
+              >
+                {t("重新安排")}
+              </Button>
+              <Button
                 icon={<Edit3 size={16} />}
                 onClick={() => openEditMilestone(selectedMilestoneFresh)}
               >
@@ -3660,13 +3825,53 @@ function ManagementApp({
         {selectedMilestoneFresh && (
           <Space direction="vertical" size={20} className="drawer-content">
             <div>
-              <Space align="center" wrap>
+              <Space align="center" wrap className="milestone-title-row">
                 <Title level={3} className="drawer-title">
                   {selectedMilestoneFresh.title}
                 </Title>
-                <Tag color={milestoneStatusMap[selectedMilestoneFresh.status]?.color}>
-                  {t(milestoneStatusMap[selectedMilestoneFresh.status]?.text || "计划")}
-                </Tag>
+                {selectedMilestoneFresh.canEdit ? (
+                  <Dropdown
+                    menu={{
+                      selectedKeys: [selectedMilestoneFresh.status],
+                      items: editableMilestoneStatuses.map((value) => {
+                        const config = milestoneStatusMap[value];
+                        return {
+                          key: value,
+                          label: (
+                            <Space size={8}>
+                              <Badge color={config.color} />
+                              {t(config.text)}
+                            </Space>
+                          ),
+                        };
+                      }),
+                      onClick: ({ key }) =>
+                        handleMilestoneStatusChange(selectedMilestoneFresh, key),
+                    }}
+                    trigger={["click"]}
+                    placement="bottomLeft"
+                    disabled={milestoneStatusSavingId === selectedMilestoneFresh.id}
+                  >
+                    <Button
+                      size="small"
+                      loading={milestoneStatusSavingId === selectedMilestoneFresh.id}
+                      className={`milestone-status-trigger ${
+                        milestoneStatusMap[selectedMilestoneDisplayStatus]?.className ||
+                        milestoneStatusMap.planned.className
+                      }`}
+                      aria-label={`${t("状态")}：${t(
+                        milestoneStatusMap[selectedMilestoneDisplayStatus]?.text || "计划",
+                      )}`}
+                    >
+                      <span>{t(milestoneStatusMap[selectedMilestoneDisplayStatus]?.text || "计划")}</span>
+                      <ChevronDown size={13} />
+                    </Button>
+                  </Dropdown>
+                ) : (
+                  <Tag color={milestoneStatusMap[selectedMilestoneDisplayStatus]?.color}>
+                    {t(milestoneStatusMap[selectedMilestoneDisplayStatus]?.text || "计划")}
+                  </Tag>
+                )}
                 {selectedMilestoneFresh.isGlobal && (
                   <Tag icon={<Globe2 size={12} />} color="purple">{t("全局")}</Tag>
                 )}
@@ -3708,6 +3913,28 @@ function ManagementApp({
           </Space>
         )}
       </Drawer>
+
+      <Modal
+        title={t("重新安排里程碑")}
+        open={milestoneRescheduleOpen}
+        onCancel={() => setMilestoneRescheduleOpen(false)}
+        onOk={handleMilestoneReschedule}
+        confirmLoading={milestoneRescheduling}
+        okButtonProps={{ disabled: !milestoneRescheduleDate }}
+        okText={t("保存")}
+        cancelText={t("取消")}
+        width={420}
+        destroyOnHidden
+      >
+        <div className="milestone-reschedule-field">
+          <Text strong>{t("新的截止日期")}</Text>
+          <DatePicker
+            className="full-width"
+            value={milestoneRescheduleDate}
+            onChange={setMilestoneRescheduleDate}
+          />
+        </div>
+      </Modal>
 
       <Drawer
         title={t("会议信息")}

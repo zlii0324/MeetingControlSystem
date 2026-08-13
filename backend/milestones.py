@@ -164,6 +164,10 @@ def _public_milestone(
             "displayName": milestone["creator_display_name"],
         },
         "relatedUsers": _related_users(conn, int(milestone["id"])),
+        "isPinned": conn.execute(
+            "SELECT 1 FROM milestone_pins WHERE milestone_id = ? AND user_id = ?",
+            (milestone["id"], current_user["id"]),
+        ).fetchone() is not None,
         "canEdit": creator_id == int(current_user["id"]) or current_user.get("role") == "admin",
         "createdAt": milestone["created_at"],
         "updatedAt": milestone["updated_at"],
@@ -342,6 +346,37 @@ def update_milestone(
             _replace_related_users(conn, milestone_id, related_user_ids)
             updated_row = _fetch_milestone_row(conn, milestone_id)
             return _public_milestone(conn, updated_row, current_user)
+
+
+def update_milestone_pin(
+    milestone_id: int,
+    pinned: Any,
+    current_user: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(pinned, bool):
+        raise MilestoneError("置顶设置无效")
+
+    with process_write_lock():
+        with get_connection() as conn:
+            row = _fetch_milestone_row(conn, milestone_id)
+            if row is None or not _is_visible(conn, row, current_user):
+                raise MilestoneError("里程碑不存在", 404)
+
+            if pinned:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO milestone_pins (milestone_id, user_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (milestone_id, current_user["id"], _utc_now_text()),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM milestone_pins WHERE milestone_id = ? AND user_id = ?",
+                    (milestone_id, current_user["id"]),
+                )
+
+            return _public_milestone(conn, row, current_user)
 
 
 def delete_milestone(milestone_id: int, current_user: dict[str, Any]) -> dict[str, Any]:

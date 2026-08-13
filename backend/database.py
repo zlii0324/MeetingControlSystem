@@ -399,6 +399,15 @@ def _init_db_locked() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS milestone_pins (
+                milestone_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (milestone_id, user_id),
+                FOREIGN KEY (milestone_id) REFERENCES milestones(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
             CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
             CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
@@ -422,6 +431,8 @@ def _init_db_locked() -> None:
             CREATE INDEX IF NOT EXISTS idx_milestones_created_by ON milestones(created_by);
             CREATE INDEX IF NOT EXISTS idx_milestone_related_users_user_id
                 ON milestone_related_users(user_id);
+            CREATE INDEX IF NOT EXISTS idx_milestone_pins_user_id
+                ON milestone_pins(user_id);
             """
         )
 

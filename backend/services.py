@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import re
 import secrets
 import sqlite3
-import unicodedata
 import uuid
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
-
-from pypinyin import Style, lazy_pinyin
 
 from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
@@ -75,15 +71,8 @@ def parse_datetime(value: str | None, field_name: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def meeting_title_slug(title: str) -> str:
-    transliterated = "-".join(lazy_pinyin(title, style=Style.NORMAL))
-    ascii_title = unicodedata.normalize("NFKD", transliterated).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-") or "meeting"
-
-
-def generate_room_id(title: str, start_time: datetime, suffix: int | None = None) -> str:
-    base_room_id = f"{meeting_title_slug(title)}-{start_time.strftime('%Y%d%m-%H-%M')}"
-    return f"{base_room_id}-{suffix}" if suffix and suffix > 1 else base_room_id
+def generate_room_id() -> str:
+    return f"{config.room_prefix}-{uuid.uuid4().hex[:12]}"
 
 
 def generate_password() -> str:
@@ -593,7 +582,7 @@ def _create_meeting(
         payload["attendees"] if "attendees" in payload else default_attendees
     )
     password_required = parse_bool(payload_value(payload, "passwordRequired", "password_required"), False)
-    room_id = generate_room_id(title, start_time)
+    room_id = generate_room_id()
     password = generate_password() if password_required else None
     password_hash_value = hash_password(password) if password else ""
     password_encrypted_value = encrypt_password(password, config.password_secret) if password else ""
@@ -607,10 +596,8 @@ def _create_meeting(
     with get_connection() as conn:
         try:
             attendees = _expand_special_attendees(conn, attendees, actor_user)
-            suffix = 2
             while conn.execute("SELECT 1 FROM meetings WHERE room_id = ? LIMIT 1", (room_id,)).fetchone():
-                room_id = generate_room_id(title, start_time, suffix)
-                suffix += 1
+                room_id = generate_room_id()
 
             for index in range(occurrence_count):
                 occurrence_room_id = room_id
