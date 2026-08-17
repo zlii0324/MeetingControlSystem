@@ -3791,22 +3791,24 @@ function ManagementApp({
         <Spin spinning={loading}>
           <section className="meeting-calendar">
             <div className="calendar-toolbar">
-              <Space size={8}>
-                <Button icon={<ChevronLeft size={16} />} onClick={goPrevious} aria-label={t("上一页")} />
-                <Button onClick={goToday}>{t("今天")}</Button>
-                <Button icon={<ChevronRight size={16} />} onClick={goNext} aria-label={t("下一页")} />
-              </Space>
               <Text strong className="calendar-range">
                 {calendarRangeLabel}
               </Text>
-              <Segmented
-                value={calendarView}
-                onChange={(value) => setCalendarView(value)}
-                options={[
-                  { label: t("周"), value: "week" },
-                  { label: t("月"), value: "month" },
-                ]}
-              />
+              <div className="calendar-toolbar-actions">
+                <Space size={8}>
+                  <Button icon={<ChevronLeft size={16} />} onClick={goPrevious} aria-label={t("上一页")} />
+                  <Button onClick={goToday}>{t("今天")}</Button>
+                  <Button icon={<ChevronRight size={16} />} onClick={goNext} aria-label={t("下一页")} />
+                </Space>
+                <Segmented
+                  value={calendarView}
+                  onChange={(value) => setCalendarView(value)}
+                  options={[
+                    { label: t("周"), value: "week" },
+                    { label: t("月"), value: "month" },
+                  ]}
+                />
+              </div>
             </div>
 
             <div className="calendar-filter-bar" aria-label={t("日历筛选")}>
