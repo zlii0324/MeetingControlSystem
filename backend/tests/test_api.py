@@ -1158,6 +1158,7 @@ def test_regular_user_can_update_own_profile_without_admin_access(client):
         "/api/auth/profile",
         json={
             "displayName": "Alice Zhang",
+            "jobTitle": "项目经理",
             "phoneNumber": "+86 138 0013 8000",
             "email": "alice.zhang@example.com",
             "role": "admin",
@@ -1167,6 +1168,7 @@ def test_regular_user_can_update_own_profile_without_admin_access(client):
     assert update_response.status_code == 200
     updated = update_response.get_json()["user"]
     assert updated["displayName"] == "Alice Zhang"
+    assert updated["jobTitle"] == "项目经理"
     assert updated["phoneNumber"] == "+86 138 0013 8000"
     assert updated["email"] == "alice.zhang@example.com"
     assert updated["role"] == "scheduler"

@@ -153,6 +153,8 @@ const english = {
   "只会删除用户组，不会删除组内用户。": "Only the group will be deleted; its users will not be deleted.",
   "可填写用途或范围": "Optional purpose or scope",
   "可选择 @all、整个用户组、具体用户，或输入外部邮箱": "Select @all, a user group or specific users, or enter an external email address",
+  "共 {{count}} 人": "{{count}} people",
+  "共 {{count}} 个用户组": "{{count}} user groups",
   "名成员": " members",
   "否": "No",
   "员工": "Employee",

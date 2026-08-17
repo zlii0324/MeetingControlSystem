@@ -16,7 +16,6 @@ import {
   List,
   Modal,
   Popconfirm,
-  Popover,
   Segmented,
   Select,
   Space,
@@ -1848,7 +1847,7 @@ function UserManagementDrawer({
   );
 }
 
-function PersonnelDirectoryDrawer({ open, users, onClose }) {
+function PersonnelDirectoryModal({ open, users, onClose }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleUsers = useMemo(() => {
@@ -1865,37 +1864,67 @@ function PersonnelDirectoryDrawer({ open, users, onClose }) {
   }, [open]);
 
   return (
-    <Drawer title={t("人员信息")} open={open} onClose={onClose} width={640}>
-      <Input
-        allowClear
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder={t("搜索姓名、职称、电话号码或邮箱")}
-        className="directory-search"
-      />
-      <List
-        dataSource={visibleUsers}
-        locale={{
-          emptyText: (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("暂无人员信息")} />
-          ),
-        }}
-        renderItem={(item) => (
-          <List.Item>
-            <div className="user-row-main">
-              <Text strong>{item.displayName}</Text>
-              <Text type="secondary">{t("职称：")}{displayJobTitle(item)}</Text>
-              <Text type="secondary">
-                <Phone size={14} /> {item.phoneNumber || t("未填写电话号码")}
-              </Text>
-              <Text type="secondary">
-                <Mail size={14} /> {item.email || t("未填写邮箱")}
-              </Text>
-            </div>
-          </List.Item>
-        )}
-      />
-    </Drawer>
+    <Modal
+      title={(
+        <Space size={8}>
+          <Users size={18} />
+          <span>{t("人员信息")}</span>
+        </Space>
+      )}
+      open={open}
+      onCancel={onClose}
+      footer={[
+        <Button key="done" type="primary" onClick={onClose}>{t("完成")}</Button>,
+      ]}
+      centered
+      width={680}
+      className="directory-modal centered-settings-modal"
+      destroyOnHidden
+    >
+      <div className="directory-modal-content">
+        <div className="modal-toolbar directory-toolbar">
+          <Input
+            allowClear
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("搜索姓名、职称、电话号码或邮箱")}
+            className="directory-search"
+          />
+          <Text type="secondary" className="modal-result-count">
+            {t("共 {{count}} 人", { count: visibleUsers.length })}
+          </Text>
+        </div>
+        <div className="modal-scroll-area directory-list-scroll">
+          <List
+            split={false}
+            dataSource={visibleUsers}
+            locale={{
+              emptyText: (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("暂无人员信息")} />
+              ),
+            }}
+            renderItem={(item) => (
+              <List.Item className="directory-person-item">
+                <div className="directory-person-row">
+                  <div className="directory-person-identity">
+                    <Text strong>{item.displayName}</Text>
+                    <Text type="secondary">{displayJobTitle(item)}</Text>
+                  </div>
+                  <div className="directory-person-contact">
+                    <Text type="secondary">
+                      <Phone size={14} /> {item.phoneNumber || t("未填写电话号码")}
+                    </Text>
+                    <Text type="secondary">
+                      <Mail size={14} /> {item.email || t("未填写邮箱")}
+                    </Text>
+                  </div>
+                </div>
+              </List.Item>
+            )}
+          />
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -2053,7 +2082,7 @@ function GroupMemberModal({ open, group, loading, onCancel, onSubmit }) {
   );
 }
 
-function GroupManagementDrawer({
+function GroupManagementModal({
   open,
   groups,
   loading,
@@ -2175,30 +2204,46 @@ function GroupManagementDrawer({
   });
 
   return (
-    <Drawer
-      title={isSystemAdmin ? t("全部用户组") : t("我的用户组")}
+    <Modal
+      title={(
+        <Space size={8}>
+          <Users size={18} />
+          <span>{isSystemAdmin ? t("全部用户组") : t("我的用户组")}</span>
+        </Space>
+      )}
       open={open}
-      onClose={onClose}
-      width={720}
-      extra={
+      onCancel={onClose}
+      footer={[
+        <Button key="done" onClick={onClose}>{t("完成")}</Button>,
+      ]}
+      centered
+      width={820}
+      className="group-management-modal centered-settings-modal"
+      destroyOnHidden
+    >
+      <div className="modal-toolbar group-modal-toolbar">
+        <Text type="secondary">
+          {t("共 {{count}} 个用户组", { count: groups.length })}
+        </Text>
         <Space>
           <RefreshButton onRefresh={onRefresh} ariaLabel={t("刷新用户组")} />
           <Button type="primary" icon={<Plus size={16} />} onClick={onCreate}>{t("创建组")}</Button>
         </Space>
-      }
-    >
-      <Spin spinning={loading}>
-        {collapseItems.length ? (
-          <Collapse items={collapseItems} className="group-collapse" />
-        ) : (
-          <Empty description={t("暂无用户组，可以先创建一个")} />
-        )}
-      </Spin>
-    </Drawer>
+      </div>
+      <div className="modal-scroll-area group-list-scroll">
+        <Spin spinning={loading}>
+          {collapseItems.length ? (
+            <Collapse items={collapseItems} className="group-collapse" />
+          ) : (
+            <Empty description={t("暂无用户组，可以先创建一个")} />
+          )}
+        </Spin>
+      </div>
+    </Modal>
   );
 }
 
-function PreferencesPopover({
+function PreferencesModal({
   preferences,
   onChange,
   customThemeColor,
@@ -2209,8 +2254,7 @@ function PreferencesPopover({
   emailPreferenceSaving,
   onEmailNotificationsChange,
   open,
-  onOpenChange,
-  children,
+  onClose,
 }) {
   const [customColorInput, setCustomColorInput] = useState(customThemeColor || "");
   const normalizedCustomColor = customColorInput.trim().toLowerCase();
@@ -2220,26 +2264,43 @@ function PreferencesPopover({
     setCustomColorInput(customThemeColor || "");
   }, [customThemeColor]);
 
-  const content = (
-    <div className="preferences-card">
-      <div className="preferences-section">
-        <Text strong>
-          <Space size={6}>
-            <Languages size={15} />
-            {t("语言")}
-          </Space>
-        </Text>
-        <Segmented
-          block
-          value={preferences.language}
-          onChange={(value) => onChange({ ...preferences, language: value })}
-          options={[
-            { label: "中文", value: "zh-CN" },
-            { label: "EN", value: "en-US" },
-          ]}
-          aria-label={t("语言")}
-        />
-      </div>
+  return (
+    <Modal
+      title={(
+        <Space size={8}>
+          <Palette size={18} />
+          <span>{t("首选项")}</span>
+        </Space>
+      )}
+      open={open}
+      onCancel={onClose}
+      footer={[
+        <Button key="done" type="primary" onClick={onClose}>{t("完成")}</Button>,
+      ]}
+      centered
+      width={640}
+      className="preferences-modal centered-settings-modal"
+      destroyOnHidden
+    >
+      <div className="preferences-card">
+        <div className="preferences-section">
+          <Text strong>
+            <Space size={6}>
+              <Languages size={15} />
+              {t("语言")}
+            </Space>
+          </Text>
+          <Segmented
+            block
+            value={preferences.language}
+            onChange={(value) => onChange({ ...preferences, language: value })}
+            options={[
+              { label: "中文", value: "zh-CN" },
+              { label: "EN", value: "en-US" },
+            ]}
+            aria-label={t("语言")}
+          />
+        </div>
 
       <div className="preferences-section">
         <Text strong>{t("显示模式")}</Text>
@@ -2273,7 +2334,7 @@ function PreferencesPopover({
         />
       </div>
 
-      <div className="preferences-section">
+      <div className="preferences-section preferences-section-wide">
         <Text strong>{t("主题颜色")}</Text>
         <div className="preference-color-grid">
           {colorThemeOptions.map((option) => {
@@ -2340,7 +2401,7 @@ function PreferencesPopover({
         <Text type="secondary" className="custom-color-help">{t("输入 # 加 6 位十六进制字符，例如 #1f6feb")}</Text>
       </div>
 
-      <div className="preferences-section">
+      <div className="preferences-section preferences-section-wide">
         <Text strong>{t("账号设置")}</Text>
         <div className="preference-toggle-row">
           <div className="preference-toggle-copy">
@@ -2355,20 +2416,8 @@ function PreferencesPopover({
           />
         </div>
       </div>
-    </div>
-  );
-
-  return (
-    <Popover
-      title={t("首选项")}
-      content={content}
-      trigger="click"
-      placement="bottomRight"
-      open={open}
-      onOpenChange={onOpenChange}
-    >
-      {children}
-    </Popover>
+        </div>
+    </Modal>
   );
 }
 
@@ -2380,6 +2429,7 @@ function ProfileModal({ open, user, loading, onCancel, onSubmit, onOpenPasswordC
     form.resetFields();
     form.setFieldsValue({
       displayName: user.displayName,
+      jobTitle: user.jobTitle || "",
       phoneNumber: user.phoneNumber || "+86",
       email: user.email,
     });
@@ -2402,6 +2452,14 @@ function ProfileModal({ open, user, loading, onCancel, onSubmit, onOpenPasswordC
           rules={[{ required: true, message: t("请输入用户昵称（真实姓名）") }]}
         >
           <Input maxLength={80} />
+        </Form.Item>
+
+        <Form.Item
+          label={t("职称")}
+          name="jobTitle"
+          rules={[{ required: true, message: t("请输入职称") }]}
+        >
+          <Input maxLength={80} placeholder={t("例如：教授、项目经理、工程师")} />
         </Form.Item>
 
         <Form.Item label={t("电话号码")} name="phoneNumber">
@@ -2636,8 +2694,8 @@ function ManagementApp({
   const [customThemeSaving, setCustomThemeSaving] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
-  const [groupDrawerOpen, setGroupDrawerOpen] = useState(false);
-  const [directoryDrawerOpen, setDirectoryDrawerOpen] = useState(false);
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
+  const [directoryModalOpen, setDirectoryModalOpen] = useState(false);
   const [groupFormOpen, setGroupFormOpen] = useState(false);
   const [groupFormMode, setGroupFormMode] = useState("create");
   const [groupMemberOpen, setGroupMemberOpen] = useState(false);
@@ -2723,11 +2781,13 @@ function ManagementApp({
   const handleProfileSubmit = async (values) => {
     const normalizedProfile = {
       displayName: String(values.displayName || "").trim(),
+      jobTitle: String(values.jobTitle || "").trim(),
       phoneNumber: completeInternationalPhoneNumber(values.phoneNumber),
       email: String(values.email || "").trim().toLocaleLowerCase(),
     };
     const currentProfile = {
       displayName: String(currentUser.displayName || "").trim(),
+      jobTitle: String(currentUser.jobTitle || "").trim(),
       phoneNumber: completeInternationalPhoneNumber(currentUser.phoneNumber),
       email: String(currentUser.email || "").trim().toLocaleLowerCase(),
     };
@@ -3403,9 +3463,9 @@ function ManagementApp({
     } else if (key === "calendar-subscription") {
       openCalendarSubscription();
     } else if (key === "directory") {
-      setDirectoryDrawerOpen(true);
+      setDirectoryModalOpen(true);
     } else if (key === "groups") {
-      setGroupDrawerOpen(true);
+      setGroupModalOpen(true);
     } else if (key === "logout") {
       handleLogout();
     }
@@ -3713,10 +3773,7 @@ function ManagementApp({
             </div>
             <Dropdown
               open={accountMenuOpen}
-              onOpenChange={(nextOpen) => {
-                setAccountMenuOpen(nextOpen);
-                if (nextOpen) setPreferencesOpen(false);
-              }}
+              onOpenChange={setAccountMenuOpen}
               menu={{ items: accountMenuItems, onClick: handleAccountMenuClick }}
               trigger={["click"]}
               placement="bottomRight"
@@ -3728,21 +3785,6 @@ function ManagementApp({
                 title={t("用户菜单")}
               />
             </Dropdown>
-            <PreferencesPopover
-              preferences={preferences}
-              onChange={onPreferenceChange}
-              customThemeColor={currentUser.customThemeColor}
-              customThemeSaving={customThemeSaving}
-              onCustomThemeSave={handleCustomThemeSave}
-              onCustomThemeClear={handleCustomThemeClear}
-              emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
-              emailPreferenceSaving={emailPreferenceSaving}
-              onEmailNotificationsChange={handleEmailNotificationsChange}
-              open={preferencesOpen}
-              onOpenChange={setPreferencesOpen}
-            >
-              <span className="preferences-popover-anchor" aria-hidden="true" />
-            </PreferencesPopover>
           </div>
         </Flex>
 
@@ -4136,18 +4178,32 @@ function ManagementApp({
         onCopy={copyText}
       />
 
-      <PersonnelDirectoryDrawer
-        open={directoryDrawerOpen}
-        users={directoryUsers}
-        onClose={() => setDirectoryDrawerOpen(false)}
+      <PreferencesModal
+        preferences={preferences}
+        onChange={onPreferenceChange}
+        customThemeColor={currentUser.customThemeColor}
+        customThemeSaving={customThemeSaving}
+        onCustomThemeSave={handleCustomThemeSave}
+        onCustomThemeClear={handleCustomThemeClear}
+        emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
+        emailPreferenceSaving={emailPreferenceSaving}
+        onEmailNotificationsChange={handleEmailNotificationsChange}
+        open={preferencesOpen}
+        onClose={() => setPreferencesOpen(false)}
       />
 
-      <GroupManagementDrawer
-        open={groupDrawerOpen}
+      <PersonnelDirectoryModal
+        open={directoryModalOpen}
+        users={directoryUsers}
+        onClose={() => setDirectoryModalOpen(false)}
+      />
+
+      <GroupManagementModal
+        open={groupModalOpen}
         groups={groups}
         loading={groupsLoading || groupSaving}
         isSystemAdmin={isAdmin}
-        onClose={() => setGroupDrawerOpen(false)}
+        onClose={() => setGroupModalOpen(false)}
         onCreate={openCreateGroup}
         onEdit={openEditGroup}
         onDelete={handleDeleteGroup}

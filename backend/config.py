@@ -74,7 +74,7 @@ class Config:
     jitsi_base_url: str = _as_str("JITSI_BASE_URL", "https://meet.wusupower.com/")
     jitsi_jwt_app_id: str = _as_str("JITSI_JWT_APP_ID")
     jitsi_jwt_app_secret: str = _as_str("JITSI_JWT_APP_SECRET")
-    jitsi_jwt_subject: str = _as_str("JITSI_JWT_SUBJECT", "meet.jitsi")
+    jitsi_jwt_subject: str = _as_str("JITSI_JWT_SUBJECT", "meet.wusupower.com")
     jitsi_jwt_ttl_seconds: int = _as_int("JITSI_JWT_TTL_SECONDS", 7200)
     room_prefix: str = _as_str("ROOM_PREFIX", "mcs")
     frontend_origins: tuple[str, ...] = _as_origin_list("FRONTEND_ORIGIN")

@@ -229,7 +229,15 @@ def update_own_preferences(user_id: int, payload: dict[str, Any]) -> dict[str, A
 def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     profile_fields_present = any(
         key in payload
-        for key in ("displayName", "display_name", "phoneNumber", "phone_number", "email")
+        for key in (
+            "displayName",
+            "display_name",
+            "jobTitle",
+            "job_title",
+            "phoneNumber",
+            "phone_number",
+            "email",
+        )
     )
     if not profile_fields_present:
         raise AuthError("没有可更新的个人资料")
@@ -244,6 +252,11 @@ def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                 normalize_display_name(payload.get("displayName") or payload.get("display_name"))
                 if "displayName" in payload or "display_name" in payload
                 else row["display_name"]
+            )
+            job_title = (
+                normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
+                if "jobTitle" in payload or "job_title" in payload
+                else row["job_title"]
             )
             phone_number = (
                 normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number"))
@@ -260,10 +273,10 @@ def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
             conn.execute(
                 """
                 UPDATE users
-                   SET display_name = ?, phone_number = ?, email = ?, updated_at = ?
+                   SET display_name = ?, job_title = ?, phone_number = ?, email = ?, updated_at = ?
                  WHERE id = ?
                 """,
-                (display_name, phone_number, email, isoformat(utc_now()), user_id),
+                (display_name, job_title, phone_number, email, isoformat(utc_now()), user_id),
             )
             row = _fetch_user_by_id(conn, user_id)
 
