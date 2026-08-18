@@ -2305,6 +2305,7 @@ function PreferencesModal({
       <div className="preferences-section">
         <Text strong>{t("显示模式")}</Text>
         <Segmented
+          className="appearance-mode-segmented"
           block
           value={preferences.appearanceMode}
           onChange={(value) => onChange({ ...preferences, appearanceMode: value })}
@@ -2327,7 +2328,7 @@ function PreferencesModal({
               value: "system",
               label: (
                 <Space size={6}>
-                  <Monitor size={15} />{t("跟随系统")}</Space>
+                  <Monitor size={15} />{t("自动")}</Space>
               ),
             },
           ]}
@@ -3549,12 +3550,14 @@ function ManagementApp({
                   showMeeting(meeting);
                 }}
               >
-                <span className="chip-time">{dayjs(meeting.startTime).format("HH:mm")}</span>
+                <span className="chip-icon">
+                  <Video size={12} />
+                </span>
                 <span className="chip-title">
-                  <Video size={12} className="chip-repeat-icon" />
                   {meeting.isRecurring && <Repeat2 size={12} className="chip-repeat-icon" />}
                   <span>{meeting.title}</span>
                 </span>
+                <span className="chip-time">{dayjs(meeting.startTime).format("HH:mm")}</span>
               </button>
             );
           })}
@@ -3571,7 +3574,7 @@ function ManagementApp({
                   showMilestone(milestone);
                 }}
               >
-                <span className="chip-time milestone-kind">
+                <span className="chip-icon milestone-kind">
                   <Flag size={12} />
                 </span>
                 <span className="chip-title">

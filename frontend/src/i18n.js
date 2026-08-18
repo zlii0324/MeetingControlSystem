@@ -365,7 +365,7 @@ const english = {
   "账号已通过审核": "Account approved",
   "账号申请已拒绝": "Account request rejected",
   "账号设置": "Account settings",
-  "跟随系统": "System",
+  "自动": "Auto",
   "输入 # 加 6 位十六进制字符，例如 #1f6feb": "Enter # followed by 6 hexadecimal characters, for example #1f6feb",
   "输入账号绑定的邮箱，我们会发送一个限时、一次性使用的重置链接。": "Enter your account email and we’ll send a time-limited, one-time reset link.",
   "返回": "Back",

@@ -366,7 +366,7 @@ textarea {
 }
 
 .calendar-cell.is-selected-day {
-  background: var(--accent-soft);
+  background: #dbe8ff;
   box-shadow: inset 0 2px 0 var(--accent);
 }
 
@@ -426,12 +426,12 @@ textarea {
   width: 100%;
   height: 23px;
   border: 0;
+  border-left: 3px solid currentColor;
   border-radius: 6px;
-  padding: 0 7px;
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
+  padding: 0 5px;
+  display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   cursor: pointer;
   text-align: left;
   transition:
@@ -444,12 +444,22 @@ textarea {
   box-shadow: 0 3px 10px var(--shadow);
 }
 
+.chip-icon {
+  flex: 0 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .chip-time {
-  font-size: 11px;
-  font-weight: 700;
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .chip-title {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -479,8 +489,7 @@ textarea {
 }
 
 .milestone-chip {
-  grid-template-columns: 18px minmax(0, 1fr);
-  border-left: 3px solid currentColor;
+  gap: 5px;
 }
 
 .milestone-planned {
@@ -574,8 +583,8 @@ textarea {
 }
 
 .status-scheduled {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: #eaf2ff;
+  color: #1d4ed8;
 }
 
 .status-running {
@@ -1084,6 +1093,15 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.appearance-mode-segmented .ant-space-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.appearance-mode-segmented .ant-space-item .lucide {
+  display: block;
+}
+
 .preferences-modal .ant-modal-body {
   max-height: min(70vh, 650px);
   overflow-y: auto;
@@ -1183,6 +1201,15 @@ textarea {
 :root[data-theme="dark"] .status-running {
   background: #173526;
   color: #79d59e;
+}
+
+:root[data-theme="dark"] .status-scheduled {
+  background: #172a4d;
+  color: #8eb8ff;
+}
+
+:root[data-theme="dark"] .calendar-cell.is-selected-day {
+  background: #101c32;
 }
 
 :root[data-theme="dark"] .status-finished {
@@ -1380,7 +1407,4 @@ textarea {
     height: 280px;
   }
 
-  .meeting-chip {
-    grid-template-columns: 34px minmax(0, 1fr);
-  }
 }
