@@ -2250,9 +2250,6 @@ function PreferencesModal({
   customThemeSaving,
   onCustomThemeSave,
   onCustomThemeClear,
-  emailNotificationsEnabled,
-  emailPreferenceSaving,
-  onEmailNotificationsChange,
   open,
   onClose,
 }) {
@@ -2402,27 +2399,22 @@ function PreferencesModal({
         <Text type="secondary" className="custom-color-help">{t("输入 # 加 6 位十六进制字符，例如 #1f6feb")}</Text>
       </div>
 
-      <div className="preferences-section preferences-section-wide">
-        <Text strong>{t("账号设置")}</Text>
-        <div className="preference-toggle-row">
-          <div className="preference-toggle-copy">
-            <Text>{t("会议邮件提醒")}</Text>
-            <Text type="secondary">{t("被添加为参会者时接收邀请邮件")}</Text>
-          </div>
-          <Switch
-            checked={emailNotificationsEnabled}
-            loading={emailPreferenceSaving}
-            onChange={onEmailNotificationsChange}
-            aria-label={t("接收会议邮件提醒")}
-          />
-        </div>
-      </div>
         </div>
     </Modal>
   );
 }
 
-function ProfileModal({ open, user, loading, onCancel, onSubmit, onOpenPasswordChange }) {
+function ProfileModal({
+  open,
+  user,
+  loading,
+  emailNotificationsEnabled,
+  emailPreferenceSaving,
+  onEmailNotificationsChange,
+  onCancel,
+  onSubmit,
+  onOpenPasswordChange,
+}) {
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -2477,6 +2469,19 @@ function ProfileModal({ open, user, loading, onCancel, onSubmit, onOpenPasswordC
         >
           <Input type="email" autoComplete="email" maxLength={120} />
         </Form.Item>
+
+        <div className="preference-toggle-row profile-notification-row">
+          <div className="preference-toggle-copy">
+            <Text>{t("会议邮件提醒")}</Text>
+            <Text type="secondary">{t("被添加为参会者时接收邀请邮件")}</Text>
+          </div>
+          <Switch
+            checked={emailNotificationsEnabled}
+            loading={emailPreferenceSaving}
+            onChange={onEmailNotificationsChange}
+            aria-label={t("接收会议邮件提醒")}
+          />
+        </div>
 
         <Flex justify="space-between" align="center" gap={10} className="modal-actions">
           <Button
@@ -4190,9 +4195,6 @@ function ManagementApp({
         customThemeSaving={customThemeSaving}
         onCustomThemeSave={handleCustomThemeSave}
         onCustomThemeClear={handleCustomThemeClear}
-        emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
-        emailPreferenceSaving={emailPreferenceSaving}
-        onEmailNotificationsChange={handleEmailNotificationsChange}
         open={preferencesOpen}
         onClose={() => setPreferencesOpen(false)}
       />
@@ -4239,6 +4241,9 @@ function ManagementApp({
         open={profileModalOpen}
         user={currentUser}
         loading={profileSaving}
+        emailNotificationsEnabled={currentUser.emailNotificationsEnabled !== false}
+        emailPreferenceSaving={emailPreferenceSaving}
+        onEmailNotificationsChange={handleEmailNotificationsChange}
         onCancel={() => setProfileModalOpen(false)}
         onSubmit={handleProfileSubmit}
         onOpenPasswordChange={() => setPasswordModalOpen(true)}
