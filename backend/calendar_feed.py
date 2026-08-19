@@ -7,7 +7,9 @@ from typing import Any
 
 from config import config
 from crypto import decrypt_password, encrypt_password
-from database import get_connection, process_write_lock
+from database import process_write_lock, session_scope
+from models import CalendarSubscriptionToken, User
+from sqlalchemy import select
 from services import list_meetings
 
 
@@ -41,44 +43,29 @@ def _subscription_urls(token: str) -> tuple[str, str]:
 def ensure_calendar_subscription(user: dict[str, Any]) -> dict[str, Any]:
     user_id = int(user["id"])
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT token_encrypted, created_at
-                  FROM calendar_subscription_tokens
-                 WHERE user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
+        with session_scope() as session:
+            row = session.get(CalendarSubscriptionToken, user_id)
             token: str | None = None
             created_at: str | None = None
             if row is not None:
                 try:
-                    token = decrypt_password(row["token_encrypted"], config.password_secret)
-                    created_at = row["created_at"]
+                    token = decrypt_password(row.token_encrypted, config.password_secret)
+                    created_at = row.created_at
                 except Exception:
-                    conn.execute(
-                        "DELETE FROM calendar_subscription_tokens WHERE user_id = ?",
-                        (user_id,),
-                    )
+                    session.delete(row)
+                    session.flush()
 
             if not token:
                 token = secrets.token_urlsafe(32)
                 created_at = _utc_timestamp()
-                conn.execute(
-                    """
-                    INSERT INTO calendar_subscription_tokens (
-                        user_id, token_hash, token_encrypted, created_at, updated_at
+                session.add(
+                    CalendarSubscriptionToken(
+                        user_id=user_id,
+                        token_hash=_token_hash(token),
+                        token_encrypted=encrypt_password(token, config.password_secret),
+                        created_at=created_at,
+                        updated_at=created_at,
                     )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user_id,
-                        _token_hash(token),
-                        encrypt_password(token, config.password_secret),
-                        created_at,
-                        created_at,
-                    ),
                 )
 
     subscription_url, webcal_url = _subscription_urls(token)
@@ -93,27 +80,29 @@ def _subscription_user(token: str) -> dict[str, Any]:
     normalized_token = str(token or "").strip()
     if not normalized_token or len(normalized_token) > 200:
         raise CalendarFeedError("日历订阅地址无效", 404)
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT u.id, u.username, u.display_name, u.email, u.job_title, u.role, u.status
-              FROM calendar_subscription_tokens c
-              JOIN users u ON u.id = c.user_id
-             WHERE c.token_hash = ? AND u.status = 'active'
-            """,
-            (_token_hash(normalized_token),),
-        ).fetchone()
-    if row is None:
-        raise CalendarFeedError("日历订阅地址无效", 404)
-    return {
-        "id": row["id"],
-        "username": row["username"],
-        "displayName": row["display_name"],
-        "email": row["email"],
-        "jobTitle": row["job_title"],
-        "role": row["role"],
-        "status": row["status"],
-    }
+    with session_scope() as session:
+        user = session.scalar(
+            select(User)
+            .join(
+                CalendarSubscriptionToken,
+                CalendarSubscriptionToken.user_id == User.id,
+            )
+            .where(
+                CalendarSubscriptionToken.token_hash == _token_hash(normalized_token),
+                User.status == "active",
+            )
+        )
+        if user is None:
+            raise CalendarFeedError("日历订阅地址无效", 404)
+        return {
+            "id": user.id,
+            "username": user.username,
+            "displayName": user.display_name,
+            "email": user.email,
+            "jobTitle": user.job_title,
+            "role": user.role,
+            "status": user.status,
+        }
 
 
 def _parse_datetime(value: Any) -> datetime:

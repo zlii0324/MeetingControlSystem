@@ -148,6 +148,7 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "status": "ok",
+                "databaseBackend": config.database_backend,
                 "jitsiBaseUrl": config.normalized_jitsi_base_url,
                 "jitsiJwtEnabled": config.jitsi_jwt_enabled,
             }

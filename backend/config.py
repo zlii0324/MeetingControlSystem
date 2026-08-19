@@ -71,6 +71,17 @@ class Config:
         "DATABASE_PATH",
         str(INSTANCE_DIR / "meetings.sqlite3"),
     )
+    database_host: str = os.getenv("DATABASE_HOST", "").strip()
+    database_port: int = _as_int("DATABASE_PORT", 3306)
+    database_name: str = os.getenv("DATABASE_NAME", "").strip()
+    database_username: str = os.getenv("DATABASE_USERNAME", "").strip()
+    database_password: str = os.getenv("DATABASE_PASSWORD", "")
+    database_charset: str = _as_str("DATABASE_CHARSET", "utf8mb4")
+    database_pool_size: int = _as_int("DATABASE_POOL_SIZE", 10)
+    database_pool_recycle_seconds: int = _as_int(
+        "DATABASE_POOL_RECYCLE_SECONDS",
+        1800,
+    )
     jitsi_base_url: str = _as_str("JITSI_BASE_URL", "https://meet.wusupower.com/")
     jitsi_jwt_app_id: str = _as_str("JITSI_JWT_APP_ID")
     jitsi_jwt_app_secret: str = _as_str("JITSI_JWT_APP_SECRET")
@@ -114,6 +125,25 @@ class Config:
     password_reset_cooldown_seconds: int = _as_int("PASSWORD_RESET_COOLDOWN_SECONDS", 60)
 
     def __post_init__(self) -> None:
+        mysql_values = (
+            self.database_host,
+            self.database_name,
+            self.database_username,
+            self.database_password,
+        )
+        if any(mysql_values) and not all(
+            (self.database_host, self.database_name, self.database_username)
+        ):
+            raise ValueError(
+                "DATABASE_HOST, DATABASE_NAME and DATABASE_USERNAME must be "
+                "configured together; leave all MySQL fields blank to use SQLite"
+            )
+        if not 1 <= self.database_port <= 65535:
+            raise ValueError("DATABASE_PORT must be between 1 and 65535")
+        if self.database_pool_size <= 0:
+            raise ValueError("DATABASE_POOL_SIZE must be greater than zero")
+        if self.database_pool_recycle_seconds < 0:
+            raise ValueError("DATABASE_POOL_RECYCLE_SECONDS cannot be negative")
         jwt_values = (self.jitsi_jwt_app_id, self.jitsi_jwt_app_secret)
         if any(jwt_values) and not all(jwt_values):
             raise ValueError(
@@ -129,6 +159,14 @@ class Config:
     @property
     def jitsi_jwt_enabled(self) -> bool:
         return bool(self.jitsi_jwt_app_id and self.jitsi_jwt_app_secret)
+
+    @property
+    def database_backend(self) -> str:
+        return "mysql" if self.database_host else "sqlite"
+
+    @property
+    def mysql_enabled(self) -> bool:
+        return self.database_backend == "mysql"
 
     @property
     def frontend_origin(self) -> str:

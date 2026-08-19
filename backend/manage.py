@@ -6,9 +6,11 @@ import sys
 from urllib.parse import quote, urlencode
 
 from auth import AuthError, create_admin_user, normalize_username, reset_user_password
-from database import init_db
+from database import init_db, session_scope
 from config import config
 from jitsi_auth import JitsiJwtError, create_jitsi_token
+from models import User
+from sqlalchemy import select
 
 
 def prompt_required(label: str, default: str | None = None) -> str:
@@ -49,15 +51,12 @@ def create_admin(args: argparse.Namespace) -> int:
             print(f"用户名无效：{exc}", file=sys.stderr)
             return 1
 
-        from database import get_connection
-
-        with get_connection() as conn:
-            existing = conn.execute(
-                "SELECT username FROM users WHERE username = ?",
-                (normalized_username,),
-            ).fetchone()
+        with session_scope() as session:
+            existing = session.scalar(
+                select(User).where(User.username == normalized_username)
+            )
         if existing is not None:
-            print(f"管理员已存在：{existing['username']}")
+            print(f"管理员已存在：{existing.username}")
             return 0
 
     try:
@@ -86,16 +85,14 @@ def reset_password(args: argparse.Namespace) -> int:
         print(f"用户名无效：{exc}", file=sys.stderr)
         return 1
 
-    from database import get_connection
-
-    with get_connection() as conn:
-        row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        user_id = session.scalar(select(User.id).where(User.username == username))
+        if user_id is None:
             print("用户不存在", file=sys.stderr)
             return 1
 
     try:
-        result = reset_user_password(int(row["id"]))
+        result = reset_user_password(int(user_id))
     except AuthError as exc:
         print(f"重置失败：{exc}", file=sys.stderr)
         return 1

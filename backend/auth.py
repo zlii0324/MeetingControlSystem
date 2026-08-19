@@ -3,17 +3,26 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
 from pypinyin import Style, lazy_pinyin
+from sqlalchemy import case, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from config import config
 from crypto import hash_password, verify_password
-from database import get_connection, process_write_lock
+from database import process_write_lock, session_scope
 from mailer import send_password_reset_email
+from models import (
+    PasswordResetRequest,
+    PasswordResetToken,
+    User,
+    UserSession,
+    model_to_dict,
+)
 
 
 ROLES = {"admin", "scheduler"}
@@ -144,8 +153,14 @@ def generate_temporary_password() -> str:
     return f"Mcs-{secrets.token_urlsafe(9)}"
 
 
-def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool = False) -> dict[str, Any]:
-    data = dict(row)
+def _as_user_data(user: User | dict[str, Any]) -> dict[str, Any]:
+    return model_to_dict(user) if isinstance(user, User) else dict(user)
+
+
+def user_payload(
+    user: User | dict[str, Any], include_review_fields: bool = False
+) -> dict[str, Any]:
+    data = _as_user_data(user)
     payload = {
         "id": data["id"],
         "username": data["username"],
@@ -153,7 +168,7 @@ def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool 
         "email": data["email"],
         "jobTitle": data.get("job_title", ""),
         "phoneNumber": normalize_phone_number(data.get("phone_number", "")),
-        "emailNotificationsEnabled": bool(data.get("email_notifications_enabled", 1)),
+        "emailNotificationsEnabled": bool(data.get("email_notifications_enabled", True)),
         "customThemeColor": data.get("custom_theme_color"),
         "role": data["role"],
         "status": data["status"],
@@ -173,181 +188,170 @@ def user_payload(row: dict[str, Any] | sqlite3.Row, include_review_fields: bool 
     return payload
 
 
-def update_own_preferences(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    assignments: list[str] = []
-    values: list[Any] = []
-
-    if "emailNotificationsEnabled" in payload:
-        enabled = payload["emailNotificationsEnabled"]
-    elif "email_notifications_enabled" in payload:
-        enabled = payload["email_notifications_enabled"]
-    else:
-        enabled = None
-
-    if enabled is not None:
-        if not isinstance(enabled, bool):
-            raise AuthError("邮件提醒设置无效")
-        assignments.append("email_notifications_enabled = ?")
-        values.append(1 if enabled else 0)
-
-    custom_color_present = (
-        "customThemeColor" in payload or "custom_theme_color" in payload
-    )
-    if custom_color_present:
-        raw_custom_color = payload.get(
-            "customThemeColor",
-            payload.get("custom_theme_color"),
-        )
-        if raw_custom_color is None or str(raw_custom_color).strip() == "":
-            custom_color = None
-        else:
-            custom_color = str(raw_custom_color).strip().lower()
-            if not re.fullmatch(r"#[0-9a-f]{6}", custom_color):
-                raise AuthError("自定义颜色格式应为 #xxxxxx")
-        assignments.append("custom_theme_color = ?")
-        values.append(custom_color)
-
-    if not assignments:
-        raise AuthError("没有可更新的首选项")
-
-    now = isoformat(utc_now())
-    assignments.append("updated_at = ?")
-    values.extend([now, user_id])
-    with process_write_lock():
-        with get_connection() as conn:
-            if _fetch_user_by_id(conn, user_id) is None:
-                raise AuthError("用户不存在", 404)
-            conn.execute(
-                f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
-                values,
-            )
-            row = _fetch_user_by_id(conn, user_id)
-
-    return user_payload(row)
-
-
-def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    profile_fields_present = any(
-        key in payload
-        for key in (
-            "displayName",
-            "display_name",
-            "jobTitle",
-            "job_title",
-            "phoneNumber",
-            "phone_number",
-            "email",
-        )
-    )
-    if not profile_fields_present:
-        raise AuthError("没有可更新的个人资料")
-
-    with process_write_lock():
-        with get_connection() as conn:
-            row = _fetch_user_by_id(conn, user_id)
-            if row is None:
-                raise AuthError("用户不存在", 404)
-
-            display_name = (
-                normalize_display_name(payload.get("displayName") or payload.get("display_name"))
-                if "displayName" in payload or "display_name" in payload
-                else row["display_name"]
-            )
-            job_title = (
-                normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
-                if "jobTitle" in payload or "job_title" in payload
-                else row["job_title"]
-            )
-            phone_number = (
-                normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number"))
-                if "phoneNumber" in payload or "phone_number" in payload
-                else row["phone_number"]
-            )
-            email = (
-                normalize_required_email(payload.get("email"))
-                if "email" in payload
-                else row["email"]
-            )
-            _ensure_email_available(conn, email, user_id)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET display_name = ?, job_title = ?, phone_number = ?, email = ?, updated_at = ?
-                 WHERE id = ?
-                """,
-                (display_name, job_title, phone_number, email, isoformat(utc_now()), user_id),
-            )
-            row = _fetch_user_by_id(conn, user_id)
-
-    return user_payload(row)
-
-
-def password_reset_request_payload(row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    payload = {
+def password_reset_request_payload(
+    request: PasswordResetRequest | dict[str, Any],
+    user: User | None = None,
+) -> dict[str, Any]:
+    data = model_to_dict(request) if isinstance(request, PasswordResetRequest) else dict(request)
+    return {
         "id": data["id"],
         "userId": data["user_id"],
-        "username": data["username"],
-        "displayName": data["display_name"],
-        "email": data["email"],
+        "username": user.username if user else data["username"],
+        "displayName": user.display_name if user else data["display_name"],
+        "email": user.email if user else data["email"],
         "message": data["message"],
         "status": data["status"],
         "requestedAt": data["requested_at"],
         "reviewedBy": data.get("reviewed_by"),
         "reviewedAt": data.get("reviewed_at"),
     }
-    return payload
 
 
-def _fetch_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+def _fetch_user_by_username(session: Session, username: str) -> User | None:
+    return session.scalar(select(User).where(User.username == username))
 
 
-def _fetch_user_by_email(conn: sqlite3.Connection, email: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+def _fetch_user_by_email(session: Session, email: str) -> User | None:
+    return session.scalar(select(User).where(User.email == email))
 
 
-def _fetch_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+def _fetch_user_by_id(session: Session, user_id: int) -> User | None:
+    return session.get(User, user_id)
 
 
-def _active_admin_count(conn: sqlite3.Connection, exclude_user_id: int | None = None) -> int:
-    if exclude_user_id is None:
-        row = conn.execute(
-            "SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND status = 'active'"
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-              FROM users
-             WHERE role = 'admin'
-               AND status = 'active'
-               AND id != ?
-            """,
-            (exclude_user_id,),
-        ).fetchone()
-    return int(row["count"])
+def _active_admin_count(session: Session, exclude_user_id: int | None = None) -> int:
+    statement = select(func.count()).select_from(User).where(
+        User.role == "admin", User.status == "active"
+    )
+    if exclude_user_id is not None:
+        statement = statement.where(User.id != exclude_user_id)
+    return int(session.scalar(statement) or 0)
 
 
-def _would_remove_active_admin(user: sqlite3.Row, new_role: str | None = None, new_status: str | None = None) -> bool:
-    role = new_role or user["role"]
-    status = new_status or user["status"]
-    return user["role"] == "admin" and user["status"] == "active" and (role != "admin" or status != "active")
+def _would_remove_active_admin(
+    user: User, new_role: str | None = None, new_status: str | None = None
+) -> bool:
+    role = new_role or user.role
+    status = new_status or user.status
+    return user.role == "admin" and user.status == "active" and (
+        role != "admin" or status != "active"
+    )
 
 
-def _ensure_another_active_admin(conn: sqlite3.Connection, user_id: int) -> None:
-    if _active_admin_count(conn, exclude_user_id=user_id) < 1:
+def _ensure_another_active_admin(session: Session, user_id: int) -> None:
+    if _active_admin_count(session, exclude_user_id=user_id) < 1:
         raise AuthError("至少需要保留一个可用管理员账号", 409)
 
 
-def _ensure_email_available(conn: sqlite3.Connection, email: str | None, user_id: int | None = None) -> None:
+def _ensure_email_available(
+    session: Session, email: str | None, user_id: int | None = None
+) -> None:
     if not email:
         return
-    existing = _fetch_user_by_email(conn, email)
-    if existing and existing["id"] != user_id:
+    existing = _fetch_user_by_email(session, email)
+    if existing and existing.id != user_id:
         raise AuthError("邮箱已被使用", 409)
+
+
+def _invalidate_reset_tokens(session: Session, user_id: int, used_at: str) -> None:
+    tokens = session.scalars(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    ).all()
+    for token in tokens:
+        token.used_at = used_at
+
+
+def update_own_preferences(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    if "emailNotificationsEnabled" in payload:
+        enabled = payload["emailNotificationsEnabled"]
+    else:
+        enabled = payload.get("email_notifications_enabled")
+    enabled_present = "emailNotificationsEnabled" in payload or "email_notifications_enabled" in payload
+
+    if enabled_present and not isinstance(enabled, bool):
+        raise AuthError("邮件提醒设置无效")
+    color_present = "customThemeColor" in payload or "custom_theme_color" in payload
+    if not enabled_present and not color_present:
+        raise AuthError("没有可更新的首选项")
+
+    custom_color: str | None = None
+    if color_present:
+        raw_color = payload.get("customThemeColor", payload.get("custom_theme_color"))
+        if raw_color is not None and str(raw_color).strip():
+            custom_color = str(raw_color).strip().lower()
+            if not re.fullmatch(r"#[0-9a-f]{6}", custom_color):
+                raise AuthError("自定义颜色格式应为 #xxxxxx")
+
+    with process_write_lock():
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
+                raise AuthError("用户不存在", 404)
+            if enabled_present:
+                user.email_notifications_enabled = bool(enabled)
+            if color_present:
+                user.custom_theme_color = custom_color
+            user.updated_at = isoformat(utc_now())
+            session.flush()
+            return user_payload(user)
+
+
+def update_own_profile(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "displayName", "display_name", "jobTitle", "job_title",
+        "phoneNumber", "phone_number", "email",
+    }
+    if not any(key in payload for key in fields):
+        raise AuthError("没有可更新的个人资料")
+
+    with process_write_lock():
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
+                raise AuthError("用户不存在", 404)
+            if "displayName" in payload or "display_name" in payload:
+                user.display_name = normalize_display_name(
+                    payload.get("displayName") or payload.get("display_name")
+                )
+            if "jobTitle" in payload or "job_title" in payload:
+                user.job_title = normalize_job_title(
+                    payload.get("jobTitle") or payload.get("job_title")
+                )
+            if "phoneNumber" in payload or "phone_number" in payload:
+                user.phone_number = normalize_phone_number(
+                    payload.get("phoneNumber") or payload.get("phone_number")
+                )
+            if "email" in payload:
+                email = normalize_required_email(payload.get("email"))
+                _ensure_email_available(session, email, user_id)
+                user.email = email
+            user.updated_at = isoformat(utc_now())
+            session.flush()
+            return user_payload(user)
+
+
+def _new_user(
+    *, username: str, display_name: str, email: str, job_title: str,
+    phone_number: str, password: str, role: str, status: str,
+    now: str, register_message: str | None = None,
+) -> User:
+    return User(
+        username=username,
+        display_name=display_name,
+        email=email,
+        job_title=job_title,
+        phone_number=phone_number,
+        password_hash=hash_password(password),
+        role=role,
+        status=status,
+        register_message=register_message,
+        approved_at=now if status == "active" else None,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def register_user(payload: dict[str, Any]) -> dict[str, Any]:
@@ -355,313 +359,199 @@ def register_user(payload: dict[str, Any]) -> dict[str, Any]:
     display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
     email = normalize_required_email(payload.get("email"))
     job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
-    phone_number = normalize_phone_number(
-        payload.get("phoneNumber", payload.get("phone_number", DEFAULT_PHONE_NUMBER))
-    )
+    phone_number = normalize_phone_number(payload.get("phoneNumber", payload.get("phone_number", "")))
     password = normalize_password(payload.get("password"))
-    register_message = normalize_register_message(
-        payload.get("registerMessage") or payload.get("register_message")
-    )
+    message = normalize_register_message(payload.get("registerMessage") or payload.get("register_message"))
     now = isoformat(utc_now())
 
     with process_write_lock():
-        with get_connection() as conn:
-            if _fetch_user_by_username(conn, username):
+        with session_scope() as session:
+            if _fetch_user_by_username(session, username):
                 raise AuthError("用户名已存在", 409)
-            _ensure_email_available(conn, email)
-
-            cursor = conn.execute(
-                """
-                INSERT INTO users (
-                    username, display_name, email, job_title, phone_number, password_hash, role, status,
-                    register_message, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 'scheduler', 'pending', ?, ?, ?)
-                """,
-                (
-                    username,
-                    display_name,
-                    email,
-                    job_title,
-                    phone_number,
-                    hash_password(password),
-                    register_message,
-                    now,
-                    now,
-                ),
+            _ensure_email_available(session, email)
+            user = _new_user(
+                username=username, display_name=display_name, email=email,
+                job_title=job_title, phone_number=phone_number, password=password,
+                role="scheduler", status="pending", now=now, register_message=message,
             )
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
-
-    return user_payload(row, include_review_fields=True)
+            session.add(user)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise AuthError("用户名或邮箱已存在", 409) from exc
+            return user_payload(user, include_review_fields=True)
 
 
 def create_admin_user(
-    *,
-    username: str,
-    display_name: str,
-    password: str,
-    email: str,
-    job_title: str = "",
-    phone_number: str = DEFAULT_PHONE_NUMBER,
+    *, username: str, display_name: str, password: str, email: str,
+    job_title: str = "", phone_number: str = DEFAULT_PHONE_NUMBER,
 ) -> dict[str, Any]:
-    normalized_username = normalize_username(username)
-    normalized_display_name = normalize_display_name(display_name)
-    normalized_email = normalize_required_email(email)
-    normalized_job_title = normalize_job_title(job_title)
-    normalized_phone_number = normalize_phone_number(phone_number)
-    normalized_password = normalize_password(password)
+    return _create_user_record(
+        username=normalize_username(username),
+        display_name=normalize_display_name(display_name),
+        email=normalize_required_email(email),
+        job_title=normalize_job_title(job_title),
+        phone_number=normalize_phone_number(phone_number),
+        password=normalize_password(password),
+        role="admin",
+        status="active",
+    )
+
+
+def _create_user_record(**values: Any) -> dict[str, Any]:
     now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            if _fetch_user_by_username(conn, normalized_username):
+        with session_scope() as session:
+            if _fetch_user_by_username(session, values["username"]):
                 raise AuthError("用户名已存在", 409)
-            _ensure_email_available(conn, normalized_email)
-
-            cursor = conn.execute(
-                """
-                INSERT INTO users (
-                    username, display_name, email, job_title, phone_number, password_hash, role, status,
-                    approved_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 'admin', 'active', ?, ?, ?)
-                """,
-                (
-                    normalized_username,
-                    normalized_display_name,
-                    normalized_email,
-                    normalized_job_title,
-                    normalized_phone_number,
-                    hash_password(normalized_password),
-                    now,
-                    now,
-                    now,
-                ),
-            )
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
-
-    return user_payload(row, include_review_fields=True)
+            _ensure_email_available(session, values["email"])
+            user = _new_user(now=now, **values)
+            session.add(user)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise AuthError("用户名或邮箱已存在", 409) from exc
+            return user_payload(user, include_review_fields=True)
 
 
 def login_user(
-    payload: dict[str, Any],
-    ip_address: str | None,
-    user_agent: str | None,
+    payload: dict[str, Any], ip_address: str | None, user_agent: str | None
 ) -> dict[str, Any]:
     identifier_type, identifier = normalize_account_identifier(
         payload.get("account") or payload.get("username") or payload.get("email")
     )
     password = str(payload.get("password") or "")
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = (
-                _fetch_user_by_email(conn, identifier)
+        with session_scope() as session:
+            user = (
+                _fetch_user_by_email(session, identifier)
                 if identifier_type == "email"
-                else _fetch_user_by_username(conn, identifier)
+                else _fetch_user_by_username(session, identifier)
             )
-            if row is None or not verify_password(password, row["password_hash"]):
+            if user is None or not verify_password(password, user.password_hash):
                 raise AuthError("用户名、邮箱或密码错误", 401)
-
-            if row["status"] == "pending":
-                raise AuthError("账号待管理员审核", 403)
-            if row["status"] == "rejected":
-                raise AuthError("账号申请已被拒绝", 403)
-            if row["status"] == "disabled":
-                raise AuthError("账号已停用", 403)
-            if row["status"] != "active":
-                raise AuthError("账号状态异常", 403)
+            messages = {
+                "pending": "账号待管理员审核",
+                "rejected": "账号申请已被拒绝",
+                "disabled": "账号已停用",
+            }
+            if user.status != "active":
+                raise AuthError(messages.get(user.status, "账号状态异常"), 403)
 
             now = utc_now()
             now_text = isoformat(now)
-            ttl_days = max(1, config.session_ttl_days)
-            expires_at = isoformat(now + timedelta(days=ttl_days))
-            token = secrets.token_urlsafe(32)
-            conn.execute(
-                """
-                INSERT INTO user_sessions (
-                    user_id, token_hash, expires_at, created_ip, user_agent,
-                    created_at, last_seen_at
+            expires_at = isoformat(now + timedelta(days=max(1, config.session_ttl_days)))
+            raw_token = secrets.token_urlsafe(32)
+            session.add(
+                UserSession(
+                    user_id=user.id,
+                    token_hash=token_hash(raw_token),
+                    expires_at=expires_at,
+                    created_ip=ip_address,
+                    user_agent=user_agent,
+                    created_at=now_text,
+                    last_seen_at=now_text,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["id"],
-                    token_hash(token),
-                    expires_at,
-                    ip_address,
-                    user_agent,
-                    now_text,
-                    now_text,
-                ),
             )
-            conn.execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now_text, now_text, row["id"]))
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
-
-    return {"token": token, "expiresAt": expires_at, "user": user_payload(row)}
+            user.last_login_at = now_text
+            user.updated_at = now_text
+            session.flush()
+            return {"token": raw_token, "expiresAt": expires_at, "user": user_payload(user)}
 
 
 def get_authenticated_user(token: str | None) -> dict[str, Any]:
     if not token:
         raise AuthError("请先登录", 401)
-
-    hashed_token = token_hash(token)
     now_text = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT users.*, user_sessions.id AS session_id
-                  FROM user_sessions
-                  JOIN users ON users.id = user_sessions.user_id
-                 WHERE user_sessions.token_hash = ?
-                   AND user_sessions.revoked_at IS NULL
-                   AND user_sessions.expires_at > ?
-                """,
-                (hashed_token, now_text),
-            ).fetchone()
+        with session_scope() as session:
+            row = session.execute(
+                select(UserSession, User)
+                .join(User, User.id == UserSession.user_id)
+                .where(
+                    UserSession.token_hash == token_hash(token),
+                    UserSession.revoked_at.is_(None),
+                    UserSession.expires_at > now_text,
+                )
+            ).one_or_none()
             if row is None:
                 raise AuthError("请先登录", 401)
-
-            if row["status"] != "active":
-                conn.execute(
-                    """
-                    UPDATE user_sessions
-                       SET revoked_at = ?
-                     WHERE id = ?
-                    """,
-                    (now_text, row["session_id"]),
-                )
+            user_session, user = row
+            if user.status != "active":
+                user_session.revoked_at = now_text
                 raise AuthError("账号不可用", 403)
-
-            conn.execute(
-                "UPDATE user_sessions SET last_seen_at = ? WHERE id = ?",
-                (now_text, row["session_id"]),
-            )
-
-    return user_payload(row)
+            user_session.last_seen_at = now_text
+            return user_payload(user)
 
 
 def logout_token(token: str | None) -> None:
     if not token:
         return
-
-    now_text = isoformat(utc_now())
     with process_write_lock():
-        with get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE user_sessions
-                   SET revoked_at = ?
-                 WHERE token_hash = ?
-                   AND revoked_at IS NULL
-                """,
-                (now_text, token_hash(token)),
+        with session_scope() as session:
+            user_session = session.scalar(
+                select(UserSession).where(
+                    UserSession.token_hash == token_hash(token),
+                    UserSession.revoked_at.is_(None),
+                )
             )
+            if user_session:
+                user_session.revoked_at = isoformat(utc_now())
 
 
 def revoke_user_sessions(user_id: int) -> None:
     now_text = isoformat(utc_now())
     with process_write_lock():
-        with get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE user_sessions
-                   SET revoked_at = ?
-                 WHERE user_id = ?
-                   AND revoked_at IS NULL
-                """,
-                (now_text, user_id),
-            )
+        with session_scope() as session:
+            sessions = session.scalars(
+                select(UserSession).where(
+                    UserSession.user_id == user_id,
+                    UserSession.revoked_at.is_(None),
+                )
+            ).all()
+            for user_session in sessions:
+                user_session.revoked_at = now_text
 
 
 def create_user(payload: dict[str, Any]) -> dict[str, Any]:
-    username = normalize_username(payload.get("username"))
-    display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name"))
-    email = normalize_required_email(payload.get("email"))
-    job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
-    phone_number = normalize_phone_number(
-        payload.get("phoneNumber", payload.get("phone_number", DEFAULT_PHONE_NUMBER))
+    return _create_user_record(
+        username=normalize_username(payload.get("username")),
+        display_name=normalize_display_name(payload.get("displayName") or payload.get("display_name")),
+        email=normalize_required_email(payload.get("email")),
+        job_title=normalize_job_title(payload.get("jobTitle") or payload.get("job_title")),
+        phone_number=normalize_phone_number(payload.get("phoneNumber", payload.get("phone_number", ""))),
+        password=normalize_password(payload.get("password")),
+        role=normalize_role(payload.get("role"), "scheduler"),
+        status=normalize_user_status(payload.get("status"), "active"),
     )
-    password = normalize_password(payload.get("password"))
-    role = normalize_role(payload.get("role"), "scheduler")
-    status = normalize_user_status(payload.get("status"), "active")
-    now = isoformat(utc_now())
-
-    with process_write_lock():
-        with get_connection() as conn:
-            if _fetch_user_by_username(conn, username):
-                raise AuthError("用户名已存在", 409)
-            _ensure_email_available(conn, email)
-
-            cursor = conn.execute(
-                """
-                INSERT INTO users (
-                    username, display_name, email, job_title, phone_number, password_hash, role, status,
-                    approved_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    username,
-                    display_name,
-                    email,
-                    job_title,
-                    phone_number,
-                    hash_password(password),
-                    role,
-                    status,
-                    now if status == "active" else None,
-                    now,
-                    now,
-                ),
-            )
-            row = _fetch_user_by_id(conn, int(cursor.lastrowid))
-
-    return user_payload(row, include_review_fields=True)
 
 
 def list_users(status: str | None = None) -> list[dict[str, Any]]:
     normalized_status = str(status or "").strip() or None
     if normalized_status and normalized_status not in USER_STATUSES:
         raise AuthError("用户状态参数无效")
-
-    with get_connection() as conn:
-        if normalized_status:
-            rows = conn.execute(
-                """
-                SELECT *
-                  FROM users
-                 WHERE status = ?
-                 ORDER BY created_at DESC, id DESC
-                """,
-                (normalized_status,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT *
-                  FROM users
-                 ORDER BY
-                    CASE status
-                      WHEN 'pending' THEN 0
-                      WHEN 'active' THEN 1
-                      WHEN 'disabled' THEN 2
-                      ELSE 3
-                    END,
-                    created_at DESC,
-                    id DESC
-                """
-            ).fetchall()
-
-    return [user_payload(row, include_review_fields=True) for row in rows]
+    statement = select(User)
+    if normalized_status:
+        statement = statement.where(User.status == normalized_status).order_by(
+            User.created_at.desc(), User.id.desc()
+        )
+    else:
+        statement = statement.order_by(
+            case(
+                (User.status == "pending", 0), (User.status == "active", 1),
+                (User.status == "disabled", 2), else_=3,
+            ),
+            User.created_at.desc(), User.id.desc(),
+        )
+    with session_scope() as session:
+        users = session.scalars(statement).all()
+        return [user_payload(user, include_review_fields=True) for user in users]
 
 
-def _directory_sort_key(row: sqlite3.Row) -> tuple[str, str, str]:
-    display_name = str(row["display_name"] or "").strip()
+def _directory_sort_key(user: User) -> tuple[str, str, str]:
+    display_name = str(user.display_name or "").strip()
     pinyin_name = "".join(lazy_pinyin(display_name, style=Style.NORMAL)).casefold()
-    return pinyin_name, display_name.casefold(), str(row["username"] or "").casefold()
+    return pinyin_name, display_name.casefold(), str(user.username or "").casefold()
 
 
 def search_user_directory(query: Any, limit: int = 500) -> list[dict[str, Any]]:
@@ -669,197 +559,104 @@ def search_user_directory(query: Any, limit: int = 500) -> list[dict[str, Any]]:
     if len(normalized_query) > 120:
         raise AuthError("搜索内容不能超过 120 个字符")
     normalized_limit = max(1, min(int(limit), 500))
-
-    with get_connection() as conn:
-        if normalized_query:
-            escaped_query = (
-                normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    statement = select(User).where(User.status == "active")
+    if normalized_query:
+        statement = statement.where(
+            or_(
+                User.username.icontains(normalized_query, autoescape=True),
+                User.display_name.icontains(normalized_query, autoescape=True),
+                User.email.icontains(normalized_query, autoescape=True),
+                User.job_title.icontains(normalized_query, autoescape=True),
+                User.phone_number.icontains(normalized_query, autoescape=True),
             )
-            pattern = f"%{escaped_query}%"
-            rows = conn.execute(
-                """
-                SELECT id, username, display_name, email, job_title, phone_number
-                  FROM users
-                 WHERE status = 'active'
-                   AND (
-                        LOWER(username) LIKE ? ESCAPE '\\'
-                     OR LOWER(display_name) LIKE ? ESCAPE '\\'
-                     OR LOWER(email) LIKE ? ESCAPE '\\'
-                     OR LOWER(job_title) LIKE ? ESCAPE '\\'
-                     OR LOWER(phone_number) LIKE ? ESCAPE '\\'
-                   )
-                """,
-                (
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                ),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, username, display_name, email, job_title, phone_number
-                  FROM users
-                 WHERE status = 'active'
-                """
-            ).fetchall()
-
-    rows = sorted(rows, key=_directory_sort_key)[:normalized_limit]
-    return [
-        {
-            "id": row["id"],
-            "username": row["username"],
-            "displayName": row["display_name"],
-            "email": row["email"],
-            "jobTitle": row["job_title"],
-            "phoneNumber": normalize_phone_number(row["phone_number"]),
-        }
-        for row in rows
-    ]
+        )
+    with session_scope() as session:
+        users = sorted(session.scalars(statement).all(), key=_directory_sort_key)[:normalized_limit]
+        return [
+            {
+                "id": user.id, "username": user.username,
+                "displayName": user.display_name, "email": user.email,
+                "jobTitle": user.job_title,
+                "phoneNumber": normalize_phone_number(user.phone_number),
+            }
+            for user in users
+        ]
 
 
 def get_user(user_id: int) -> dict[str, Any]:
-    with get_connection() as conn:
-        row = _fetch_user_by_id(conn, user_id)
-        if row is None:
+    with session_scope() as session:
+        user = _fetch_user_by_id(session, user_id)
+        if user is None:
             raise AuthError("用户不存在", 404)
-    return user_payload(row, include_review_fields=True)
+        return user_payload(user, include_review_fields=True)
 
 
 def update_user(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    should_revoke = False
     with process_write_lock():
-        with get_connection() as conn:
-            row = _fetch_user_by_id(conn, user_id)
-            if row is None:
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-
-            display_name = (
-                normalize_display_name(payload.get("displayName") or payload.get("display_name"))
-                if "displayName" in payload or "display_name" in payload
-                else row["display_name"]
-            )
-            email = normalize_required_email(payload.get("email")) if "email" in payload else row["email"]
-            job_title = (
-                normalize_job_title(payload.get("jobTitle") or payload.get("job_title"))
-                if "jobTitle" in payload or "job_title" in payload
-                else row["job_title"]
-            )
-            phone_number = (
-                normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number"))
-                if "phoneNumber" in payload or "phone_number" in payload
-                else row["phone_number"]
-            )
-            role = normalize_role(payload.get("role"), row["role"]) if "role" in payload else row["role"]
-            status = (
-                normalize_user_status(payload.get("status"), row["status"])
-                if "status" in payload
-                else row["status"]
-            )
-
-            if _would_remove_active_admin(row, role, status):
-                _ensure_another_active_admin(conn, user_id)
-            _ensure_email_available(conn, email, user_id)
-
+            old_status = user.status
+            display_name = normalize_display_name(payload.get("displayName") or payload.get("display_name")) if "displayName" in payload or "display_name" in payload else user.display_name
+            email = normalize_required_email(payload.get("email")) if "email" in payload else user.email
+            job_title = normalize_job_title(payload.get("jobTitle") or payload.get("job_title")) if "jobTitle" in payload or "job_title" in payload else user.job_title
+            phone_number = normalize_phone_number(payload.get("phoneNumber") or payload.get("phone_number")) if "phoneNumber" in payload or "phone_number" in payload else user.phone_number
+            role = normalize_role(payload.get("role"), user.role) if "role" in payload else user.role
+            status = normalize_user_status(payload.get("status"), user.status) if "status" in payload else user.status
+            if _would_remove_active_admin(user, role, status):
+                _ensure_another_active_admin(session, user_id)
+            _ensure_email_available(session, email, user_id)
             now = isoformat(utc_now())
-            conn.execute(
-                """
-                UPDATE users
-                   SET display_name = ?,
-                       email = ?,
-                       job_title = ?,
-                       phone_number = ?,
-                       role = ?,
-                       status = ?,
-                       updated_at = ?,
-                       approved_at = CASE
-                         WHEN status != 'active' AND ? = 'active' THEN ?
-                         ELSE approved_at
-                       END
-                 WHERE id = ?
-                """,
-                (
-                    display_name,
-                    email,
-                    job_title,
-                    phone_number,
-                    role,
-                    status,
-                    now,
-                    status,
-                    now,
-                    user_id,
-                ),
-            )
-            row = _fetch_user_by_id(conn, user_id)
-
-    if row["status"] != "active":
+            user.display_name, user.email = display_name, email
+            user.job_title, user.phone_number = job_title, phone_number
+            user.role, user.status, user.updated_at = role, status, now
+            if old_status != "active" and status == "active":
+                user.approved_at = now
+            should_revoke = status != "active"
+            session.flush()
+            result = user_payload(user, include_review_fields=True)
+    if should_revoke:
         revoke_user_sessions(user_id)
-    return user_payload(row, include_review_fields=True)
+    return result
 
 
 def delete_user(user_id: int, admin_user_id: int) -> dict[str, Any]:
     if user_id == admin_user_id:
         raise AuthError("不能删除当前登录的管理员账号", 409)
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = _fetch_user_by_id(conn, user_id)
-            if row is None:
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-            if row["role"] == "admin" and row["status"] == "active":
-                _ensure_another_active_admin(conn, user_id)
-
-            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-
+            if user.role == "admin" and user.status == "active":
+                _ensure_another_active_admin(session, user_id)
+            session.delete(user)
     return {"id": user_id, "deleted": True}
+
 
 def change_own_password(user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     current_password = str(payload.get("currentPassword") or payload.get("current_password") or "")
     new_password = normalize_password(payload.get("newPassword") or payload.get("new_password"))
     confirm_password = str(payload.get("confirmPassword") or payload.get("confirm_password") or "")
-
     if new_password != confirm_password:
         raise AuthError("两次输入的新密码不一致")
-
     if current_password == new_password:
         raise AuthError("新密码不能与旧密码相同")
-
     now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = _fetch_user_by_id(conn, user_id)
-
-            if row is None:
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-
-            if row["status"] != "active":
+            if user.status != "active":
                 raise AuthError("账号不可用", 403)
-
-            if not verify_password(current_password, row["password_hash"]):
+            if not verify_password(current_password, user.password_hash):
                 raise AuthError("当前密码错误", 401)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET password_hash = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (hash_password(new_password), now, user_id),
-            )
-            conn.execute(
-                """
-                UPDATE password_reset_tokens
-                   SET used_at = ?
-                 WHERE user_id = ?
-                   AND used_at IS NULL
-                """,
-                (now, user_id),
-            )
-
+            user.password_hash = hash_password(new_password)
+            user.updated_at = now
+            _invalidate_reset_tokens(session, user_id, now)
     revoke_user_sessions(user_id)
     return {"ok": True}
 
@@ -867,36 +664,19 @@ def change_own_password(user_id: int, payload: dict[str, Any]) -> dict[str, Any]
 def reset_user_password(user_id: int) -> dict[str, Any]:
     temporary_password = generate_temporary_password()
     now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = _fetch_user_by_id(conn, user_id)
-            if row is None:
+        with session_scope() as session:
+            user = _fetch_user_by_id(session, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET password_hash = ?,
-                       status = CASE WHEN status = 'disabled' THEN status ELSE 'active' END,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (hash_password(temporary_password), now, user_id),
-            )
-            conn.execute(
-                """
-                UPDATE password_reset_tokens
-                   SET used_at = ?
-                 WHERE user_id = ?
-                   AND used_at IS NULL
-                """,
-                (now, user_id),
-            )
-            row = _fetch_user_by_id(conn, user_id)
-
+            user.password_hash = hash_password(temporary_password)
+            if user.status != "disabled":
+                user.status = "active"
+            user.updated_at = now
+            _invalidate_reset_tokens(session, user_id, now)
+            result = user_payload(user, include_review_fields=True)
     revoke_user_sessions(user_id)
-    return {"user": user_payload(row, include_review_fields=True), "temporaryPassword": temporary_password}
+    return {"user": result, "temporaryPassword": temporary_password}
 
 
 def request_password_reset(payload: dict[str, Any]) -> dict[str, Any]:
@@ -904,191 +684,109 @@ def request_password_reset(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("account") or payload.get("username") or payload.get("email")
     )
     message = normalize_reset_message(payload.get("message") or payload.get("resetMessage"))
-    now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            user = (
-                _fetch_user_by_email(conn, identifier)
-                if identifier_type == "email"
-                else _fetch_user_by_username(conn, identifier)
-            )
+        with session_scope() as session:
+            user = _fetch_user_by_email(session, identifier) if identifier_type == "email" else _fetch_user_by_username(session, identifier)
             if user is None:
                 raise AuthError("用户不存在", 404)
-            if user["status"] == "pending":
+            if user.status == "pending":
                 raise AuthError("账号仍在待审核，请等待管理员处理", 409)
-            if user["status"] == "rejected":
+            if user.status == "rejected":
                 raise AuthError("账号申请已被拒绝，不能找回密码", 409)
-
-            existing = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 WHERE user_id = ?
-                   AND password_reset_requests.status = 'pending'
-                 ORDER BY password_reset_requests.id DESC
-                 LIMIT 1
-                """,
-                (user["id"],),
-            ).fetchone()
-            if existing:
-                return password_reset_request_payload(existing)
-
-            cursor = conn.execute(
-                """
-                INSERT INTO password_reset_requests (user_id, message, status, requested_at)
-                VALUES (?, ?, 'pending', ?)
-                """,
-                (user["id"], message, now),
+            request = session.scalar(
+                select(PasswordResetRequest)
+                .where(PasswordResetRequest.user_id == user.id, PasswordResetRequest.status == "pending")
+                .order_by(PasswordResetRequest.id.desc()).limit(1)
             )
-            row = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 WHERE password_reset_requests.id = ?
-                """,
-                (cursor.lastrowid,),
-            ).fetchone()
-
-    return password_reset_request_payload(row)
+            if request is None:
+                request = PasswordResetRequest(
+                    user_id=user.id, message=message, status="pending",
+                    requested_at=isoformat(utc_now()),
+                )
+                session.add(request)
+                session.flush()
+            return password_reset_request_payload(request, user)
 
 
 def request_email_password_reset(payload: dict[str, Any]) -> dict[str, Any]:
-    """Send a one-time reset link without disclosing whether the email is registered."""
     email = normalize_required_email(payload.get("email"))
     now = utc_now()
     now_text = isoformat(now)
-    cooldown_seconds = max(0, config.password_reset_cooldown_seconds)
-    cooldown_start = isoformat(now - timedelta(seconds=cooldown_seconds))
+    cooldown_start = isoformat(now - timedelta(seconds=max(0, config.password_reset_cooldown_seconds)))
     expires_minutes = max(1, config.password_reset_token_ttl_minutes)
     raw_token: str | None = None
-    user: sqlite3.Row | None = None
     token_id: int | None = None
-
+    user_data: dict[str, Any] | None = None
     with process_write_lock():
-        with get_connection() as conn:
-            candidate = _fetch_user_by_email(conn, email)
-            if candidate is not None and candidate["status"] == "active":
-                recent = conn.execute(
-                    """
-                    SELECT id
-                      FROM password_reset_tokens
-                     WHERE user_id = ?
-                       AND used_at IS NULL
-                       AND expires_at > ?
-                       AND created_at >= ?
-                     ORDER BY id DESC
-                     LIMIT 1
-                    """,
-                    (candidate["id"], now_text, cooldown_start),
-                ).fetchone()
+        with session_scope() as session:
+            user = _fetch_user_by_email(session, email)
+            if user is not None and user.status == "active":
+                recent = session.scalar(
+                    select(PasswordResetToken).where(
+                        PasswordResetToken.user_id == user.id,
+                        PasswordResetToken.used_at.is_(None),
+                        PasswordResetToken.expires_at > now_text,
+                        PasswordResetToken.created_at >= cooldown_start,
+                    ).order_by(PasswordResetToken.id.desc()).limit(1)
+                )
                 if recent is None:
                     raw_token = secrets.token_urlsafe(32)
-                    expires_at = isoformat(now + timedelta(minutes=expires_minutes))
-                    cursor = conn.execute(
-                        """
-                        INSERT INTO password_reset_tokens (
-                            user_id, token_hash, expires_at, created_at
-                        )
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (candidate["id"], token_hash(raw_token), expires_at, now_text),
+                    reset_token = PasswordResetToken(
+                        user_id=user.id, token_hash=token_hash(raw_token),
+                        expires_at=isoformat(now + timedelta(minutes=expires_minutes)),
+                        created_at=now_text,
                     )
-                    token_id = int(cursor.lastrowid)
-                    user = candidate
+                    session.add(reset_token)
+                    session.flush()
+                    token_id = reset_token.id
+                    user_data = _as_user_data(user)
 
-    if raw_token is not None and user is not None and token_id is not None:
-        query = urlencode({"resetToken": raw_token})
-        reset_url = f"{config.password_reset_url_origin}/?{query}"
+    if raw_token and token_id and user_data:
+        reset_url = f"{config.password_reset_url_origin}/?{urlencode({'resetToken': raw_token})}"
         delivery = send_password_reset_email(
-            user["email"],
-            user["display_name"],
-            reset_url,
-            expires_minutes,
+            user_data["email"], user_data["display_name"], reset_url, expires_minutes
         )
-
         with process_write_lock():
-            with get_connection() as conn:
-                if delivery["status"] == "sent":
-                    conn.execute(
-                        """
-                        UPDATE password_reset_tokens
-                           SET used_at = ?
-                         WHERE user_id = ?
-                           AND id != ?
-                           AND used_at IS NULL
-                        """,
-                        (now_text, user["id"], token_id),
+            with session_scope() as session:
+                tokens = session.scalars(
+                    select(PasswordResetToken).where(
+                        PasswordResetToken.user_id == user_data["id"],
+                        PasswordResetToken.used_at.is_(None),
                     )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE password_reset_tokens
-                           SET used_at = ?
-                         WHERE id = ?
-                           AND used_at IS NULL
-                        """,
-                        (now_text, token_id),
-                    )
-
-    return {
-        "ok": True,
-        "message": "如果该邮箱与有效账号匹配，密码重置邮件将很快发送。",
-    }
+                ).all()
+                for reset_token in tokens:
+                    if delivery["status"] != "sent" or reset_token.id != token_id:
+                        reset_token.used_at = now_text
+    return {"ok": True, "message": "如果该邮箱与有效账号匹配，密码重置邮件将很快发送。"}
 
 
 def reset_password_with_email_token(payload: dict[str, Any]) -> dict[str, Any]:
     raw_token = str(payload.get("token") or "").strip()
     if not raw_token or len(raw_token) > 256:
         raise AuthError("重置链接无效或已过期", 400)
-
     new_password = normalize_password(payload.get("newPassword") or payload.get("new_password"))
-    confirm_password = str(
-        payload.get("confirmPassword") or payload.get("confirm_password") or ""
-    )
-    if new_password != confirm_password:
+    confirm = str(payload.get("confirmPassword") or payload.get("confirm_password") or "")
+    if new_password != confirm:
         raise AuthError("两次输入的新密码不一致")
-
     now_text = isoformat(utc_now())
-    user_id: int | None = None
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT password_reset_tokens.id AS reset_token_id, users.*
-                  FROM password_reset_tokens
-                  JOIN users ON users.id = password_reset_tokens.user_id
-                 WHERE password_reset_tokens.token_hash = ?
-                   AND password_reset_tokens.used_at IS NULL
-                   AND password_reset_tokens.expires_at > ?
-                """,
-                (token_hash(raw_token), now_text),
-            ).fetchone()
-            if row is None or row["status"] != "active":
+        with session_scope() as session:
+            row = session.execute(
+                select(PasswordResetToken, User)
+                .join(User, User.id == PasswordResetToken.user_id)
+                .where(
+                    PasswordResetToken.token_hash == token_hash(raw_token),
+                    PasswordResetToken.used_at.is_(None),
+                    PasswordResetToken.expires_at > now_text,
+                )
+            ).one_or_none()
+            if row is None or row[1].status != "active":
                 raise AuthError("重置链接无效或已过期", 400)
-
-            user_id = int(row["id"])
-            conn.execute(
-                """
-                UPDATE users
-                   SET password_hash = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (hash_password(new_password), now_text, user_id),
-            )
-            conn.execute(
-                """
-                UPDATE password_reset_tokens
-                   SET used_at = ?
-                 WHERE user_id = ?
-                   AND used_at IS NULL
-                """,
-                (now_text, user_id),
-            )
-
+            user = row[1]
+            user.password_hash = hash_password(new_password)
+            user.updated_at = now_text
+            _invalidate_reset_tokens(session, user.id, now_text)
+            user_id = user.id
     revoke_user_sessions(user_id)
     return {"ok": True}
 
@@ -1097,202 +795,98 @@ def list_password_reset_requests(status: str | None = None) -> list[dict[str, An
     normalized_status = str(status or "").strip() or None
     if normalized_status and normalized_status not in PASSWORD_RESET_STATUSES:
         raise AuthError("密码找回状态参数无效")
-
-    with get_connection() as conn:
-        if normalized_status:
-            rows = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 WHERE password_reset_requests.status = ?
-                 ORDER BY requested_at DESC, password_reset_requests.id DESC
-                """,
-                (normalized_status,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 ORDER BY
-                    CASE password_reset_requests.status
-                      WHEN 'pending' THEN 0
-                      WHEN 'approved' THEN 1
-                      ELSE 2
-                    END,
-                    requested_at DESC,
-                    password_reset_requests.id DESC
-                """
-            ).fetchall()
-
-    return [password_reset_request_payload(row) for row in rows]
+    statement = select(PasswordResetRequest, User).join(User, User.id == PasswordResetRequest.user_id)
+    if normalized_status:
+        statement = statement.where(PasswordResetRequest.status == normalized_status).order_by(
+            PasswordResetRequest.requested_at.desc(), PasswordResetRequest.id.desc()
+        )
+    else:
+        statement = statement.order_by(
+            case(
+                (PasswordResetRequest.status == "pending", 0),
+                (PasswordResetRequest.status == "approved", 1), else_=2,
+            ),
+            PasswordResetRequest.requested_at.desc(), PasswordResetRequest.id.desc(),
+        )
+    with session_scope() as session:
+        return [password_reset_request_payload(request, user) for request, user in session.execute(statement).all()]
 
 
 def approve_password_reset_request(request_id: int, admin_user_id: int) -> dict[str, Any]:
     temporary_password = generate_temporary_password()
     now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT *
-                  FROM password_reset_requests
-                 WHERE id = ?
-                """,
-                (request_id,),
-            ).fetchone()
-            if row is None:
+        with session_scope() as session:
+            request = session.get(PasswordResetRequest, request_id)
+            if request is None:
                 raise AuthError("密码找回申请不存在", 404)
-            if row["status"] != "pending":
+            if request.status != "pending":
                 raise AuthError("密码找回申请已处理", 409)
-
-            user = _fetch_user_by_id(conn, row["user_id"])
+            user = session.get(User, request.user_id)
             if user is None:
                 raise AuthError("用户不存在", 404)
-            if user["status"] == "disabled":
+            if user.status == "disabled":
                 raise AuthError("账号已停用，不能找回密码", 409)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET password_hash = ?,
-                       status = 'active',
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (hash_password(temporary_password), now, row["user_id"]),
-            )
-            conn.execute(
-                """
-                UPDATE password_reset_requests
-                   SET status = 'approved',
-                       reviewed_by = ?,
-                       reviewed_at = ?
-                 WHERE id = ?
-                """,
-                (admin_user_id, now, request_id),
-            )
-            conn.execute(
-                """
-                UPDATE password_reset_tokens
-                   SET used_at = ?
-                 WHERE user_id = ?
-                   AND used_at IS NULL
-                """,
-                (now, row["user_id"]),
-            )
-            request_row = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 WHERE password_reset_requests.id = ?
-                """,
-                (request_id,),
-            ).fetchone()
-            user_row = _fetch_user_by_id(conn, row["user_id"])
-
-    revoke_user_sessions(int(row["user_id"]))
-    return {
-        "request": password_reset_request_payload(request_row),
-        "user": user_payload(user_row, include_review_fields=True),
-        "temporaryPassword": temporary_password,
-    }
+            user.password_hash = hash_password(temporary_password)
+            user.status, user.updated_at = "active", now
+            request.status, request.reviewed_by, request.reviewed_at = "approved", admin_user_id, now
+            _invalidate_reset_tokens(session, user.id, now)
+            session.flush()
+            user_id = user.id
+            result = {
+                "request": password_reset_request_payload(request, user),
+                "user": user_payload(user, include_review_fields=True),
+                "temporaryPassword": temporary_password,
+            }
+    revoke_user_sessions(user_id)
+    return result
 
 
 def reject_password_reset_request(request_id: int, admin_user_id: int) -> dict[str, Any]:
-    now = isoformat(utc_now())
-
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute("SELECT * FROM password_reset_requests WHERE id = ?", (request_id,)).fetchone()
-            if row is None:
+        with session_scope() as session:
+            request = session.get(PasswordResetRequest, request_id)
+            if request is None:
                 raise AuthError("密码找回申请不存在", 404)
-            if row["status"] != "pending":
+            if request.status != "pending":
                 raise AuthError("密码找回申请已处理", 409)
-
-            conn.execute(
-                """
-                UPDATE password_reset_requests
-                   SET status = 'rejected',
-                       reviewed_by = ?,
-                       reviewed_at = ?
-                 WHERE id = ?
-                """,
-                (admin_user_id, now, request_id),
-            )
-            request_row = conn.execute(
-                """
-                SELECT password_reset_requests.*, users.username, users.display_name, users.email
-                  FROM password_reset_requests
-                  JOIN users ON users.id = password_reset_requests.user_id
-                 WHERE password_reset_requests.id = ?
-                """,
-                (request_id,),
-            ).fetchone()
-
-    return password_reset_request_payload(request_row)
+            user = session.get(User, request.user_id)
+            request.status = "rejected"
+            request.reviewed_by = admin_user_id
+            request.reviewed_at = isoformat(utc_now())
+            return password_reset_request_payload(request, user)
 
 
 def approve_user(user_id: int, admin_user_id: int, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     role = normalize_role((payload or {}).get("role"), "scheduler")
-    now_text = isoformat(utc_now())
-
+    now = isoformat(utc_now())
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            if row is None:
+        with session_scope() as session:
+            user = session.get(User, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-            if row["status"] == "active":
+            if user.status == "active":
                 raise AuthError("用户已通过审核", 409)
-            if row["role"] == "admin" and role != "admin":
+            if user.role == "admin" and role != "admin":
                 raise AuthError("管理员角色不能在审核时降级", 409)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET status = 'active',
-                       role = ?,
-                       approved_by = ?,
-                       approved_at = ?,
-                       rejected_at = NULL,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (role, admin_user_id, now_text, now_text, user_id),
-            )
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-
-    return user_payload(row, include_review_fields=True)
+            user.status, user.role = "active", role
+            user.approved_by, user.approved_at = admin_user_id, now
+            user.rejected_at, user.updated_at = None, now
+            return user_payload(user, include_review_fields=True)
 
 
 def reject_user(user_id: int) -> dict[str, Any]:
-    now_text = isoformat(utc_now())
-
+    now = isoformat(utc_now())
     with process_write_lock():
-        with get_connection() as conn:
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            if row is None:
+        with session_scope() as session:
+            user = session.get(User, user_id)
+            if user is None:
                 raise AuthError("用户不存在", 404)
-            if row["role"] == "admin":
+            if user.role == "admin":
                 raise AuthError("不能拒绝管理员账号", 409)
-            if row["status"] == "active":
+            if user.status == "active":
                 raise AuthError("已通过审核的账号不能直接拒绝", 409)
-
-            conn.execute(
-                """
-                UPDATE users
-                   SET status = 'rejected',
-                       rejected_at = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (now_text, now_text, user_id),
-            )
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-
+            user.status, user.rejected_at, user.updated_at = "rejected", now, now
+            result = user_payload(user, include_review_fields=True)
     revoke_user_sessions(user_id)
-    return user_payload(row, include_review_fields=True)
+    return result

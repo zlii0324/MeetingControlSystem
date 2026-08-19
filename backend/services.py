@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import secrets
-import sqlite3
 import uuid
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from config import config
 from crypto import decrypt_password, encrypt_password, hash_password, verify_password
-from database import get_connection, process_write_lock
+from database import process_write_lock, session_scope
 from groups import resolve_group_attendee_emails
 from jitsi_auth import create_jitsi_token
 from mailer import (
@@ -20,6 +23,7 @@ from mailer import (
     send_meeting_removal_notifications,
     send_meeting_update_notifications,
 )
+from models import AccessLog, Meeting, MeetingAttendee, User, model_to_dict
 
 
 STATUSES = {"Scheduled", "Running", "Finished", "Cancelled"}
@@ -237,7 +241,7 @@ def normalize_attendees(value: Any) -> list[str]:
 
 
 def _expand_special_attendees(
-    conn: sqlite3.Connection,
+    session: Session,
     attendees: list[str],
     actor_user: dict[str, Any],
 ) -> list[str]:
@@ -250,18 +254,15 @@ def _expand_special_attendees(
 
     active_user_emails: list[str] = []
     if has_all_token:
-        user_rows = conn.execute(
-            """
-            SELECT email
-              FROM users
-             WHERE status = 'active'
-             ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC
-            """
-        ).fetchall()
+        user_rows = session.scalars(
+            select(User)
+            .where(User.status == "active")
+            .order_by(func.lower(User.display_name), func.lower(User.username))
+        ).all()
         active_user_emails = [
             email
-            for row in user_rows
-            if (email := normalize_email_address(row["email"])) is not None
+            for user in user_rows
+            if (email := normalize_email_address(user.email)) is not None
         ]
 
     expanded: list[str] = []
@@ -275,7 +276,7 @@ def _expand_special_attendees(
                 group_id = int(attendee.split(":", 1)[1])
             except (IndexError, ValueError) as exc:
                 raise MeetingError("用户组选择无效") from exc
-            candidates = resolve_group_attendee_emails(conn, group_id, actor_user)
+            candidates = resolve_group_attendee_emails(session, group_id, actor_user)
         else:
             candidates = [attendee]
         for candidate in candidates:
@@ -306,29 +307,23 @@ def _meeting_includes_user_as_attendee(meeting: dict[str, Any], user: dict[str, 
 
 
 def _resolve_attendee_email_addresses(
-    conn: sqlite3.Connection,
+    session: Session,
     attendees: list[str],
 ) -> list[str]:
     identifier_emails: dict[str, set[str]] = {}
     opted_out_emails: set[str] = set()
-    user_rows = conn.execute(
-        """
-        SELECT username, display_name, email, email_notifications_enabled
-          FROM users
-         WHERE status = 'active'
-        """
-    ).fetchall()
-    for user in user_rows:
-        email = normalize_email_address(user["email"])
+    users = session.scalars(select(User).where(User.status == "active")).all()
+    for user in users:
+        email = normalize_email_address(user.email)
         if email is None:
             continue
-        if not bool(user["email_notifications_enabled"]):
+        if not bool(user.email_notifications_enabled):
             opted_out_emails.add(email.casefold())
             continue
         identifiers = {
-            str(user["username"] or "").strip().casefold(),
-            f"@{str(user['username'] or '').strip().casefold()}",
-            str(user["display_name"] or "").strip().casefold(),
+            str(user.username or "").strip().casefold(),
+            f"@{str(user.username or '').strip().casefold()}",
+            str(user.display_name or "").strip().casefold(),
             email.casefold(),
         }
         for identifier in identifiers:
@@ -451,52 +446,55 @@ def public_meeting(meeting: dict[str, Any], include_password: str | None = None)
     return data
 
 
-def _get_attendees(conn: sqlite3.Connection, meeting_id: int) -> list[str]:
-    rows = conn.execute(
-        """
-        SELECT display_name
-          FROM meeting_attendees
-         WHERE meeting_id = ?
-         ORDER BY sort_order ASC, id ASC
-        """,
-        (meeting_id,),
-    ).fetchall()
-    return [row["display_name"] for row in rows]
-
-
-def _replace_attendees(conn: sqlite3.Connection, meeting_id: int, attendees: list[str]) -> None:
-    conn.execute("DELETE FROM meeting_attendees WHERE meeting_id = ?", (meeting_id,))
-    now = isoformat(utc_now())
-    conn.executemany(
-        """
-        INSERT INTO meeting_attendees (meeting_id, display_name, sort_order, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        [(meeting_id, attendee, index, now) for index, attendee in enumerate(attendees)],
+def _get_attendees(session: Session, meeting_id: int) -> list[str]:
+    return list(
+        session.scalars(
+            select(MeetingAttendee.display_name)
+            .where(MeetingAttendee.meeting_id == meeting_id)
+            .order_by(MeetingAttendee.sort_order, MeetingAttendee.id)
+        ).all()
     )
 
 
-def _attach_attendees(conn: sqlite3.Connection, meeting: dict[str, Any]) -> dict[str, Any]:
-    meeting["attendees"] = _get_attendees(conn, meeting["id"])
+def _replace_attendees(session: Session, meeting_id: int, attendees: list[str]) -> None:
+    existing = session.scalars(
+        select(MeetingAttendee).where(MeetingAttendee.meeting_id == meeting_id)
+    ).all()
+    for attendee in existing:
+        session.delete(attendee)
+    now = isoformat(utc_now())
+    session.add_all(
+        [
+            MeetingAttendee(
+                meeting_id=meeting_id,
+                display_name=attendee,
+                sort_order=index,
+                created_at=now,
+            )
+            for index, attendee in enumerate(attendees)
+        ]
+    )
+    session.flush()
+
+
+def _attach_attendees(session: Session, meeting: dict[str, Any]) -> dict[str, Any]:
+    meeting["attendees"] = _get_attendees(session, meeting["id"])
     return meeting
 
 
-def _refresh_expired_status(conn: sqlite3.Connection, meeting: dict[str, Any]) -> dict[str, Any]:
+def _refresh_expired_status(session: Session, meeting: dict[str, Any]) -> dict[str, Any]:
     if meeting["status"] in {"Cancelled", "Finished"}:
         return meeting
 
     end_time = parse_datetime(meeting["end_time"], "endTime")
     if end_time and utc_now() > end_time:
         now = isoformat(utc_now())
-        conn.execute(
-            """
-            UPDATE meetings
-               SET status = 'Finished', finished_at = ?, updated_at = ?
-             WHERE id = ?
-            """,
-            (now, now, meeting["id"]),
-        )
-        meeting = dict(conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting["id"],)).fetchone())
+        model = session.get(Meeting, meeting["id"])
+        model.status = "Finished"
+        model.finished_at = now
+        model.updated_at = now
+        session.flush()
+        meeting = model_to_dict(model)
     return meeting
 
 
@@ -533,19 +531,19 @@ def _select_meeting_for_room(meetings: list[dict[str, Any]]) -> dict[str, Any] |
 
 @with_process_write_lock
 def list_meetings(attendee_user: dict[str, Any], status: str | None = None) -> list[dict[str, Any]]:
-    with get_connection() as conn:
+    with session_scope() as session:
         if status and status not in STATUSES:
             raise MeetingError("会议状态参数无效")
-
-        rows = conn.execute(
-            """
-            SELECT * FROM meetings
-             ORDER BY start_time DESC, id DESC
-            """
-        ).fetchall()
-
-        meetings = [_attach_attendees(conn, _refresh_expired_status(conn, dict(row))) for row in rows]
-        conn.commit()
+        models = session.scalars(
+            select(Meeting).order_by(Meeting.start_time.desc(), Meeting.id.desc())
+        ).all()
+        meetings = [
+            _attach_attendees(
+                session,
+                _refresh_expired_status(session, model_to_dict(model)),
+            )
+            for model in models
+        ]
     public_meetings = [
         public_meeting(meeting)
         for meeting in meetings
@@ -558,14 +556,12 @@ def list_meetings(attendee_user: dict[str, Any], status: str | None = None) -> l
 
 @with_process_write_lock
 def get_meeting(meeting_id: int) -> dict[str, Any]:
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        model = session.get(Meeting, meeting_id)
+        if model is None:
             raise MeetingError("会议不存在", 404)
-
-        meeting = _refresh_expired_status(conn, dict(row))
-        meeting = _attach_attendees(conn, meeting)
-        conn.commit()
+        meeting = _refresh_expired_status(session, model_to_dict(model))
+        meeting = _attach_attendees(session, meeting)
     return public_meeting(meeting)
 
 
@@ -614,10 +610,12 @@ def _create_meeting(
     series_id = uuid.uuid4().hex if recurrence else None
     meeting_ids: list[int] = []
 
-    with get_connection() as conn:
+    with session_scope() as session:
         try:
-            attendees = _expand_special_attendees(conn, attendees, actor_user)
-            while conn.execute("SELECT 1 FROM meetings WHERE room_id = ? LIMIT 1", (room_id,)).fetchone():
+            attendees = _expand_special_attendees(session, attendees, actor_user)
+            while session.scalar(
+                select(Meeting.id).where(Meeting.room_id == room_id).limit(1)
+            ) is not None:
                 room_id = generate_room_id()
 
             for index in range(occurrence_count):
@@ -626,56 +624,45 @@ def _create_meeting(
                     recurrence_start_time(start_time, recurrence, index) if recurrence else start_time
                 )
                 occurrence_end_time = recurrence_end_time(occurrence_start_time, duration_seconds)
-                cursor = conn.execute(
-                    """
-                    INSERT INTO meetings (
-                        room_id, title, host_name, mail_owner, start_time, end_time,
-                        duration_seconds, status, password_required, password_hash, password_encrypted,
-                        max_occupants, lobby_enabled, meeting_url, series_id, recurrence_type,
-                        recurrence_interval, recurrence_count, recurrence_index, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        occurrence_room_id,
-                        title,
-                        host_name,
-                        mail_owner,
-                        isoformat(occurrence_start_time),
-                        isoformat(occurrence_end_time),
-                        duration_seconds,
-                        1 if password_required else 0,
-                        password_hash_value,
-                        password_encrypted_value,
-                        max_occupants,
-                        0,
-                        jitsi_url(occurrence_room_id),
-                        series_id,
-                        recurrence["type"] if recurrence else None,
-                        recurrence["interval"] if recurrence else 1,
-                        recurrence["count"] if recurrence else None,
-                        index if recurrence else None,
-                        now,
-                        now,
-                    ),
+                model = Meeting(
+                    room_id=occurrence_room_id,
+                    title=title,
+                    host_name=host_name,
+                    mail_owner=mail_owner,
+                    start_time=isoformat(occurrence_start_time),
+                    end_time=isoformat(occurrence_end_time),
+                    duration_seconds=duration_seconds,
+                    status="Scheduled",
+                    password_required=password_required,
+                    password_hash=password_hash_value,
+                    password_encrypted=password_encrypted_value,
+                    max_occupants=max_occupants,
+                    lobby_enabled=False,
+                    meeting_url=jitsi_url(occurrence_room_id),
+                    series_id=series_id,
+                    recurrence_type=recurrence["type"] if recurrence else None,
+                    recurrence_interval=recurrence["interval"] if recurrence else 1,
+                    recurrence_count=recurrence["count"] if recurrence else None,
+                    recurrence_index=index if recurrence else None,
+                    created_at=now,
+                    updated_at=now,
                 )
-                meeting_id = int(cursor.lastrowid)
+                session.add(model)
+                session.flush()
+                meeting_id = model.id
                 meeting_ids.append(meeting_id)
-                _replace_attendees(conn, meeting_id, attendees)
-        except sqlite3.IntegrityError as exc:
+                _replace_attendees(session, meeting_id, attendees)
+        except IntegrityError as exc:
             raise MeetingError("Room ID 冲突，请重试") from exc
-
-        placeholders = ",".join("?" for _ in meeting_ids)
-        rows = conn.execute(
-            f"""
-            SELECT * FROM meetings
-             WHERE id IN ({placeholders})
-             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
-            """,
-            tuple(meeting_ids),
-        ).fetchall()
-        meetings = [_attach_attendees(conn, dict(row)) for row in rows]
-        notification_recipients = _resolve_attendee_email_addresses(conn, attendees)
+        models = session.scalars(
+            select(Meeting)
+            .where(Meeting.id.in_(meeting_ids))
+            .order_by(func.coalesce(Meeting.recurrence_index, 0), Meeting.id)
+        ).all()
+        meetings = [
+            _attach_attendees(session, model_to_dict(model)) for model in models
+        ]
+        notification_recipients = _resolve_attendee_email_addresses(session, attendees)
 
     response = public_meeting(meetings[0], include_password=password)
     if recurrence:
@@ -735,7 +722,7 @@ def _not_requested_notification() -> dict[str, Any]:
 
 
 def _scope_meetings(
-    conn: sqlite3.Connection,
+    session: Session,
     selected: dict[str, Any],
     scope: str,
 ) -> list[dict[str, Any]]:
@@ -744,42 +731,39 @@ def _scope_meetings(
     if scope == "single":
         rows = [selected]
     elif scope == "following":
-        query_rows = conn.execute(
-            """
-            SELECT * FROM meetings
-             WHERE series_id = ?
-               AND COALESCE(recurrence_index, 0) >= COALESCE(?, 0)
-             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
-            """,
-            (selected["series_id"], selected.get("recurrence_index")),
-        ).fetchall()
-        rows = [dict(row) for row in query_rows]
+        models = session.scalars(
+            select(Meeting)
+            .where(
+                Meeting.series_id == selected["series_id"],
+                func.coalesce(Meeting.recurrence_index, 0)
+                >= (selected.get("recurrence_index") or 0),
+            )
+            .order_by(func.coalesce(Meeting.recurrence_index, 0), Meeting.id)
+        ).all()
+        rows = [model_to_dict(model) for model in models]
     else:
-        query_rows = conn.execute(
-            """
-            SELECT * FROM meetings
-             WHERE series_id = ?
-             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
-            """,
-            (selected["series_id"],),
-        ).fetchall()
-        rows = [dict(row) for row in query_rows]
+        models = session.scalars(
+            select(Meeting)
+            .where(Meeting.series_id == selected["series_id"])
+            .order_by(func.coalesce(Meeting.recurrence_index, 0), Meeting.id)
+        ).all()
+        rows = [model_to_dict(model) for model in models]
 
     return [
-        _attach_attendees(conn, _refresh_expired_status(conn, dict(meeting)))
+        _attach_attendees(session, _refresh_expired_status(session, dict(meeting)))
         for meeting in rows
     ]
 
 
 def _meeting_recipient_union(
-    conn: sqlite3.Connection,
+    session: Session,
     meetings: list[dict[str, Any]],
 ) -> list[str]:
     return _ordered_unique(
         [
             email
             for meeting in meetings
-            for email in _resolve_attendee_email_addresses(conn, meeting.get("attendees", []))
+            for email in _resolve_attendee_email_addresses(session, meeting.get("attendees", []))
         ]
     )
 
@@ -792,17 +776,20 @@ def _update_meeting(
     scope: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, list[str]], list[str], str | None]:
     normalized_scope = _normalize_recurrence_scope(scope, "修改")
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        selected_model = session.get(Meeting, meeting_id)
+        if selected_model is None:
             raise MeetingError("会议不存在", 404)
 
-        selected = _attach_attendees(conn, _refresh_expired_status(conn, dict(row)))
+        selected = _attach_attendees(
+            session,
+            _refresh_expired_status(session, model_to_dict(selected_model)),
+        )
         if selected["status"] in {"Finished", "Cancelled"}:
             raise MeetingError("已结束或已取消的会议不能修改", 409)
         target_meetings = [
             meeting
-            for meeting in _scope_meetings(conn, selected, normalized_scope)
+            for meeting in _scope_meetings(session, selected, normalized_scope)
             if meeting["status"] not in {"Finished", "Cancelled"}
         ]
         if not target_meetings:
@@ -849,8 +836,8 @@ def _update_meeting(
         attendees_present = "attendees" in payload
         attendees = normalize_attendees(payload.get("attendees")) if attendees_present else []
         if attendees_present:
-            attendees = _expand_special_attendees(conn, attendees, actor_user)
-        previous_notification_recipients = _meeting_recipient_union(conn, target_meetings)
+            attendees = _expand_special_attendees(session, attendees, actor_user)
+        previous_notification_recipients = _meeting_recipient_union(session, target_meetings)
 
         password_setting_present = "passwordRequired" in payload or "password_required" in payload
         password_required = (
@@ -908,47 +895,35 @@ def _update_meeting(
                 password_hash_value = meeting["password_hash"]
                 password_encrypted_value = meeting["password_encrypted"]
 
-            conn.execute(
-                """
-                UPDATE meetings
-                   SET title = ?, host_name = ?, mail_owner = ?, start_time = ?, end_time = ?,
-                       duration_seconds = ?, password_required = ?, password_hash = ?,
-                       password_encrypted = ?, max_occupants = ?, updated_at = ?
-                 WHERE id = ?
-                """,
-                (
-                    title,
-                    host_name,
-                    mail_owner,
-                    isoformat(updated_start),
-                    isoformat(updated_end),
-                    int((updated_end - updated_start).total_seconds()),
-                    1 if target_password_required else 0,
-                    password_hash_value,
-                    password_encrypted_value,
-                    max_occupants,
-                    now,
-                    meeting["id"],
-                ),
-            )
+            model = session.get(Meeting, meeting["id"])
+            model.title = title
+            model.host_name = host_name
+            model.mail_owner = mail_owner
+            model.start_time = isoformat(updated_start)
+            model.end_time = isoformat(updated_end)
+            model.duration_seconds = int((updated_end - updated_start).total_seconds())
+            model.password_required = target_password_required
+            model.password_hash = password_hash_value
+            model.password_encrypted = password_encrypted_value
+            model.max_occupants = max_occupants
+            model.updated_at = now
             if attendees_present:
-                _replace_attendees(conn, meeting["id"], attendees)
+                _replace_attendees(session, meeting["id"], attendees)
 
         affected_ids = [meeting["id"] for meeting in target_meetings]
-        placeholders = ",".join("?" for _ in affected_ids)
-        updated_rows = conn.execute(
-            f"""
-            SELECT * FROM meetings
-             WHERE id IN ({placeholders})
-             ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
-            """,
-            tuple(affected_ids),
-        ).fetchall()
-        updated_meetings = [_attach_attendees(conn, dict(item)) for item in updated_rows]
+        session.flush()
+        updated_models = session.scalars(
+            select(Meeting)
+            .where(Meeting.id.in_(affected_ids))
+            .order_by(func.coalesce(Meeting.recurrence_index, 0), Meeting.id)
+        ).all()
+        updated_meetings = [
+            _attach_attendees(session, model_to_dict(model))
+            for model in updated_models
+        ]
         updated_by_id = {meeting["id"]: meeting for meeting in updated_meetings}
         selected_updated = updated_by_id[meeting_id]
-        current_notification_recipients = _meeting_recipient_union(conn, updated_meetings)
-        conn.commit()
+        current_notification_recipients = _meeting_recipient_union(session, updated_meetings)
 
     previous_recipient_set = set(previous_notification_recipients)
     current_recipient_set = set(current_notification_recipients)
@@ -1043,45 +1018,45 @@ def _cancel_meeting(
     scope: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     normalized_scope = _normalize_recurrence_scope(scope, "取消")
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        selected_model = session.get(Meeting, meeting_id)
+        if selected_model is None:
             raise MeetingError("会议不存在", 404)
 
-        selected = _attach_attendees(conn, _refresh_expired_status(conn, dict(row)))
-        scoped_meetings = _scope_meetings(conn, selected, normalized_scope)
+        selected = _attach_attendees(
+            session,
+            _refresh_expired_status(session, model_to_dict(selected_model)),
+        )
+        scoped_meetings = _scope_meetings(session, selected, normalized_scope)
         target_meetings = [
             meeting
             for meeting in scoped_meetings
             if meeting["status"] not in {"Finished", "Cancelled"}
         ]
-        notification_recipients = _meeting_recipient_union(conn, target_meetings)
+        notification_recipients = _meeting_recipient_union(session, target_meetings)
         now = isoformat(utc_now())
         target_ids = [meeting["id"] for meeting in target_meetings]
         if target_ids:
-            placeholders = ",".join("?" for _ in target_ids)
-            conn.execute(
-                f"""
-                UPDATE meetings
-                   SET status = 'Cancelled', cancelled_at = ?, updated_at = ?
-                 WHERE id IN ({placeholders})
-                """,
-                (now, now, *target_ids),
-            )
-            updated_rows = conn.execute(
-                f"""
-                SELECT * FROM meetings
-                 WHERE id IN ({placeholders})
-                 ORDER BY COALESCE(recurrence_index, 0) ASC, id ASC
-                """,
-                tuple(target_ids),
-            ).fetchall()
-            affected_meetings = [_attach_attendees(conn, dict(item)) for item in updated_rows]
+            for target_id in target_ids:
+                model = session.get(Meeting, target_id)
+                model.status = "Cancelled"
+                model.cancelled_at = now
+                model.updated_at = now
+            session.flush()
+            updated_models = session.scalars(
+                select(Meeting)
+                .where(Meeting.id.in_(target_ids))
+                .order_by(func.coalesce(Meeting.recurrence_index, 0), Meeting.id)
+            ).all()
+            affected_meetings = [
+                _attach_attendees(session, model_to_dict(model))
+                for model in updated_models
+            ]
         else:
             affected_meetings = []
-        selected_row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        selected_updated = _attach_attendees(conn, dict(selected_row))
-        conn.commit()
+        selected_updated = _attach_attendees(
+            session, model_to_dict(session.get(Meeting, meeting_id))
+        )
 
     response = public_meeting(selected_updated)
     response.update(
@@ -1112,33 +1087,33 @@ def delete_meeting(meeting_id: int, scope: str | None = None) -> dict[str, Any]:
 
 @with_process_write_lock
 def get_meeting_by_room(room_id: str) -> dict[str, Any] | None:
-    with get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM meetings
-             WHERE room_id = ?
-             ORDER BY start_time ASC, COALESCE(recurrence_index, 0) ASC, id ASC
-            """,
-            (room_id,),
-        ).fetchall()
-        if not rows:
+    with session_scope() as session:
+        models = session.scalars(
+            select(Meeting)
+            .where(Meeting.room_id == room_id)
+            .order_by(
+                Meeting.start_time,
+                func.coalesce(Meeting.recurrence_index, 0),
+                Meeting.id,
+            )
+        ).all()
+        if not models:
             return None
-
-        meetings = [_refresh_expired_status(conn, dict(row)) for row in rows]
+        meetings = [
+            _refresh_expired_status(session, model_to_dict(model))
+            for model in models
+        ]
         meeting = _select_meeting_for_room(meetings)
-        conn.commit()
         return meeting
 
 
 @with_process_write_lock
 def get_meeting_for_reservation(meeting_id: int) -> dict[str, Any]:
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        model = session.get(Meeting, meeting_id)
+        if model is None:
             raise MeetingError("会议不存在", 404)
-
-        meeting = _refresh_expired_status(conn, dict(row))
-        conn.commit()
+        meeting = _refresh_expired_status(session, model_to_dict(model))
     return meeting
 
 
@@ -1231,23 +1206,17 @@ def log_access(
     success: bool,
     fail_reason: str | None = None,
 ) -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO access_logs (
-                meeting_id, room_id, ip_address, user_agent, join_time, success, fail_reason
+    with session_scope() as session:
+        session.add(
+            AccessLog(
+                meeting_id=meeting_id,
+                room_id=room_id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                join_time=isoformat(utc_now()),
+                success=success,
+                fail_reason=fail_reason,
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                meeting_id,
-                room_id,
-                ip_address,
-                user_agent,
-                isoformat(utc_now()),
-                1 if success else 0,
-                fail_reason,
-            ),
         )
 
 
@@ -1297,57 +1266,45 @@ def allocate_conference(
         return 409, {"conflict_id": meeting["id"]}
 
     now_text = isoformat(now)
-    with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE meetings
-               SET status = 'Running',
-                   mail_owner = COALESCE(?, mail_owner),
-                   last_started_at = ?,
-                   updated_at = ?
-             WHERE id = ?
-            """,
-            (mail_owner, now_text, now_text, meeting["id"]),
-        )
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting["id"],)).fetchone()
+    with session_scope() as session:
+        model = session.get(Meeting, meeting["id"])
+        model.status = "Running"
+        if mail_owner is not None:
+            model.mail_owner = mail_owner
+        model.last_started_at = now_text
+        model.updated_at = now_text
+        session.flush()
+        updated_meeting = model_to_dict(model)
 
     log_access(room_name, meeting["id"], ip_address, user_agent, True)
-    return 201, reservation_payload(dict(row))
+    return 201, reservation_payload(updated_meeting)
 
 
 @with_process_write_lock
 def finish_conference(meeting_id: int) -> dict[str, Any]:
     now = isoformat(utc_now())
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        if row is None:
+    with session_scope() as session:
+        model = session.get(Meeting, meeting_id)
+        if model is None:
             raise MeetingError("会议不存在", 404)
-
-        if row["status"] != "Cancelled":
-            conn.execute(
-                """
-                UPDATE meetings
-                   SET status = 'Finished', finished_at = ?, updated_at = ?
-                 WHERE id = ?
-                """,
-                (now, now, meeting_id),
-            )
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-
-    return public_meeting(dict(row))
+        if model.status != "Cancelled":
+            model.status = "Finished"
+            model.finished_at = now
+            model.updated_at = now
+        session.flush()
+        return public_meeting(model_to_dict(model))
 
 
 def list_access_logs(limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
-    with get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT access_logs.*, meetings.title
-              FROM access_logs
-              LEFT JOIN meetings ON meetings.id = access_logs.meeting_id
-             ORDER BY access_logs.id DESC
-             LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    with session_scope() as session:
+        rows = session.execute(
+            select(AccessLog, Meeting.title)
+            .outerjoin(Meeting, Meeting.id == AccessLog.meeting_id)
+            .order_by(AccessLog.id.desc())
+            .limit(limit)
+        ).all()
+        return [
+            {**model_to_dict(access_log), "title": title}
+            for access_log, title in rows
+        ]

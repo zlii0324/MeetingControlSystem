@@ -3,7 +3,7 @@
 这是一个基于 Jitsi Reservation 的会议管理 MVP，包含：
 
 - Flask 后端 API
-- SQLite 数据库
+- SQLAlchemy 2 ORM，支持 MySQL，并在未配置 MySQL 时自动使用 SQLite
 - React + Ant Design 单页日历 UI
 - 一次性会议密码生成与保存
 - 会议创建、查看、编辑、删除/取消
@@ -57,6 +57,11 @@ py app.py
 ```text
 http://0.0.0.0:5001
 ```
+
+数据库默认使用 `DATABASE_PATH` 指向的 SQLite 文件。生产环境如需 MySQL，填写
+`backend/.env` 中的 `DATABASE_HOST`、`DATABASE_NAME`、`DATABASE_USERNAME` 和
+`DATABASE_PASSWORD`；这些 MySQL 主配置全部留空时会自动回退到 SQLite。首次连接空的
+MySQL 数据库时，SQLAlchemy 会创建所需表和索引。
 
 ### 前端
 

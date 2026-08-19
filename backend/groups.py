@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 
-from database import get_connection, process_write_lock
+from sqlalchemy import case, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from database import process_write_lock, session_scope
+from models import User, UserGroup, UserGroupMember
 
 
 GROUP_ROLES = {"admin", "member"}
@@ -72,10 +76,9 @@ def _normalize_member_user_ids(payload: dict[str, Any]) -> list[int]:
             raise GroupError("所选用户无效") from exc
         if user_id < 1:
             raise GroupError("所选用户无效")
-        if user_id in seen:
-            continue
-        seen.add(user_id)
-        user_ids.append(user_id)
+        if user_id not in seen:
+            seen.add(user_id)
+            user_ids.append(user_id)
 
     if not user_ids:
         raise GroupError("请选择要添加的用户")
@@ -84,93 +87,85 @@ def _normalize_member_user_ids(payload: dict[str, Any]) -> list[int]:
     return user_ids
 
 
-def _fetch_group(conn: sqlite3.Connection, group_id: int) -> sqlite3.Row:
-    row = conn.execute("SELECT * FROM user_groups WHERE id = ?", (group_id,)).fetchone()
-    if row is None:
+def _fetch_group(session: Session, group_id: int) -> UserGroup:
+    group = session.get(UserGroup, group_id)
+    if group is None:
         raise GroupError("用户组不存在", 404)
-    return row
+    return group
 
 
-def _membership_role(conn: sqlite3.Connection, group_id: int, user_id: int) -> str | None:
-    row = conn.execute(
-        """
-        SELECT member_role
-          FROM user_group_members
-         WHERE group_id = ? AND user_id = ?
-        """,
-        (group_id, user_id),
-    ).fetchone()
-    return row["member_role"] if row else None
+def _membership_role(session: Session, group_id: int, user_id: int) -> str | None:
+    return session.scalar(
+        select(UserGroupMember.member_role).where(
+            UserGroupMember.group_id == group_id,
+            UserGroupMember.user_id == user_id,
+        )
+    )
 
 
 def _require_group_visibility(
-    conn: sqlite3.Connection,
+    session: Session,
     group_id: int,
     actor: dict[str, Any],
-) -> tuple[sqlite3.Row, str | None]:
-    group = _fetch_group(conn, group_id)
-    role = _membership_role(conn, group_id, int(actor["id"]))
+) -> tuple[UserGroup, str | None]:
+    group = _fetch_group(session, group_id)
+    role = _membership_role(session, group_id, int(actor["id"]))
     if not _is_system_admin(actor) and role is None:
         raise GroupError("你无权查看该用户组", 403)
     return group, role
 
 
 def _require_group_manager(
-    conn: sqlite3.Connection,
+    session: Session,
     group_id: int,
     actor: dict[str, Any],
-) -> tuple[sqlite3.Row, str | None]:
-    group, role = _require_group_visibility(conn, group_id, actor)
+) -> tuple[UserGroup, str | None]:
+    group, role = _require_group_visibility(session, group_id, actor)
     if not _is_system_admin(actor) and role != "admin":
         raise GroupError("只有组管理员可以执行此操作", 403)
     return group, role
 
 
-def _member_payload(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "username": row["username"],
-        "displayName": row["display_name"],
-        "email": row["email"],
-        "jobTitle": row["job_title"],
-        "status": row["status"],
-        "groupRole": row["member_role"],
-        "addedAt": row["member_created_at"],
-    }
-
-
 def _group_payload(
-    conn: sqlite3.Connection,
-    group: sqlite3.Row,
+    session: Session,
+    group: UserGroup,
     actor: dict[str, Any],
 ) -> dict[str, Any]:
-    member_rows = conn.execute(
-        """
-        SELECT u.id, u.username, u.display_name, u.email, u.job_title, u.status,
-               gm.member_role, gm.created_at AS member_created_at
-          FROM user_group_members gm
-          JOIN users u ON u.id = gm.user_id
-         WHERE gm.group_id = ?
-         ORDER BY
-               CASE gm.member_role WHEN 'admin' THEN 0 ELSE 1 END,
-               u.display_name COLLATE NOCASE ASC,
-               u.username COLLATE NOCASE ASC
-        """,
-        (group["id"],),
-    ).fetchall()
-    members = [_member_payload(row) for row in member_rows]
+    rows = session.execute(
+        select(User, UserGroupMember)
+        .join(UserGroupMember, User.id == UserGroupMember.user_id)
+        .where(UserGroupMember.group_id == group.id)
+        .order_by(
+            case((UserGroupMember.member_role == "admin", 0), else_=1),
+            func.lower(User.display_name),
+            func.lower(User.username),
+        )
+    ).all()
+    members = [
+        {
+            "id": user.id,
+            "username": user.username,
+            "displayName": user.display_name,
+            "email": user.email,
+            "jobTitle": user.job_title,
+            "status": user.status,
+            "groupRole": membership.member_role,
+            "addedAt": membership.created_at,
+        }
+        for user, membership in rows
+    ]
     actor_id = int(actor["id"])
     current_membership = next((member for member in members if member["id"] == actor_id), None)
     current_role = current_membership["groupRole"] if current_membership else None
     system_admin = _is_system_admin(actor)
     can_manage = system_admin or current_role == "admin"
     return {
-        "id": group["id"],
-        "name": group["name"],
-        "description": group["description"],
-        "createdBy": group["created_by"],
-        "createdAt": group["created_at"],
-        "updatedAt": group["updated_at"],
+        "id": group.id,
+        "name": group.name,
+        "description": group.description,
+        "createdBy": group.created_by,
+        "createdAt": group.created_at,
+        "updatedAt": group.updated_at,
         "memberCount": len(members),
         "members": members,
         "includesCurrentUser": current_membership is not None,
@@ -179,34 +174,27 @@ def _group_payload(
         "canRemoveMembers": can_manage,
         "canManageGroup": can_manage,
         "canDeleteGroup": can_manage,
-        "selectionValue": f"@group:{group['id']}",
+        "selectionValue": f"@group:{group.id}",
     }
 
 
 def list_groups(actor: dict[str, Any]) -> list[dict[str, Any]]:
-    with get_connection() as conn:
-        if _is_system_admin(actor):
-            rows = conn.execute(
-                "SELECT * FROM user_groups ORDER BY name COLLATE NOCASE ASC, id ASC"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT g.*
-                  FROM user_groups g
-                  JOIN user_group_members gm ON gm.group_id = g.id
-                 WHERE gm.user_id = ?
-                 ORDER BY g.name COLLATE NOCASE ASC, g.id ASC
-                """,
-                (actor["id"],),
-            ).fetchall()
-        return [_group_payload(conn, row, actor) for row in rows]
+    with session_scope() as session:
+        statement = select(UserGroup)
+        if not _is_system_admin(actor):
+            statement = statement.join(
+                UserGroupMember, UserGroupMember.group_id == UserGroup.id
+            ).where(UserGroupMember.user_id == int(actor["id"]))
+        groups = session.scalars(
+            statement.order_by(func.lower(UserGroup.name), UserGroup.id)
+        ).all()
+        return [_group_payload(session, group, actor) for group in groups]
 
 
 def get_group(group_id: int, actor: dict[str, Any]) -> dict[str, Any]:
-    with get_connection() as conn:
-        group, _role = _require_group_visibility(conn, group_id, actor)
-        return _group_payload(conn, group, actor)
+    with session_scope() as session:
+        group, _role = _require_group_visibility(session, group_id, actor)
+        return _group_payload(session, group, actor)
 
 
 @with_group_write_lock
@@ -214,57 +202,54 @@ def create_group(payload: dict[str, Any], actor: dict[str, Any]) -> dict[str, An
     name = _normalize_group_name(payload.get("name"))
     description = _normalize_group_description(payload.get("description"))
     now = utc_timestamp()
-    with get_connection() as conn:
+    with session_scope() as session:
         try:
-            cursor = conn.execute(
-                """
-                INSERT INTO user_groups (name, description, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (name, description, actor["id"], now, now),
+            group = UserGroup(
+                name=name,
+                description=description,
+                created_by=int(actor["id"]),
+                created_at=now,
+                updated_at=now,
             )
-            group_id = int(cursor.lastrowid)
-            conn.execute(
-                """
-                INSERT INTO user_group_members (
-                    group_id, user_id, member_role, added_by, created_at, updated_at
+            session.add(group)
+            session.flush()
+            session.add(
+                UserGroupMember(
+                    group_id=group.id,
+                    user_id=int(actor["id"]),
+                    member_role="admin",
+                    added_by=int(actor["id"]),
+                    created_at=now,
+                    updated_at=now,
                 )
-                VALUES (?, ?, 'admin', ?, ?, ?)
-                """,
-                (group_id, actor["id"], actor["id"], now, now),
             )
-        except sqlite3.IntegrityError as exc:
+            session.flush()
+        except IntegrityError as exc:
             raise GroupError("用户组名称已存在", 409) from exc
-        group = _fetch_group(conn, group_id)
-        return _group_payload(conn, group, actor)
+        return _group_payload(session, group, actor)
 
 
 @with_group_write_lock
 def update_group(group_id: int, payload: dict[str, Any], actor: dict[str, Any]) -> dict[str, Any]:
-    with get_connection() as conn:
-        group, _role = _require_group_manager(conn, group_id, actor)
-        name = _normalize_group_name(payload.get("name", group["name"]))
-        description = _normalize_group_description(payload.get("description", group["description"]))
+    with session_scope() as session:
+        group, _role = _require_group_manager(session, group_id, actor)
+        group.name = _normalize_group_name(payload.get("name", group.name))
+        group.description = _normalize_group_description(
+            payload.get("description", group.description)
+        )
+        group.updated_at = utc_timestamp()
         try:
-            conn.execute(
-                """
-                UPDATE user_groups
-                   SET name = ?, description = ?, updated_at = ?
-                 WHERE id = ?
-                """,
-                (name, description, utc_timestamp(), group_id),
-            )
-        except sqlite3.IntegrityError as exc:
+            session.flush()
+        except IntegrityError as exc:
             raise GroupError("用户组名称已存在", 409) from exc
-        updated = _fetch_group(conn, group_id)
-        return _group_payload(conn, updated, actor)
+        return _group_payload(session, group, actor)
 
 
 @with_group_write_lock
 def delete_group(group_id: int, actor: dict[str, Any]) -> dict[str, Any]:
-    with get_connection() as conn:
-        _require_group_manager(conn, group_id, actor)
-        conn.execute("DELETE FROM user_groups WHERE id = ?", (group_id,))
+    with session_scope() as session:
+        group, _role = _require_group_manager(session, group_id, actor)
+        session.delete(group)
     return {"id": group_id, "deleted": True}
 
 
@@ -279,86 +264,72 @@ def add_group_member(
     if requested_role not in GROUP_ROLES:
         raise GroupError("组内角色无效")
 
-    with get_connection() as conn:
-        group, actor_role = _require_group_visibility(conn, group_id, actor)
+    with session_scope() as session:
+        group, actor_role = _require_group_visibility(session, group_id, actor)
         can_manage = _is_system_admin(actor) or actor_role == "admin"
         if requested_role == "admin" and not can_manage:
             raise GroupError("只有组管理员可以添加其他组管理员", 403)
-        placeholders = ",".join("?" for _ in user_ids)
-        users = conn.execute(
-            f"SELECT id, status FROM users WHERE id IN ({placeholders})",
-            tuple(user_ids),
-        ).fetchall()
-        users_by_id = {int(user["id"]): user for user in users}
+
+        users = session.scalars(select(User).where(User.id.in_(user_ids))).all()
+        users_by_id = {user.id: user for user in users}
         if len(users_by_id) != len(user_ids):
             raise GroupError("部分用户不存在", 404)
-        if any(users_by_id[user_id]["status"] != "active" for user_id in user_ids):
+        if any(users_by_id[user_id].status != "active" for user_id in user_ids):
             raise GroupError("只能添加状态正常的用户")
 
-        existing_rows = conn.execute(
-            f"""
-            SELECT user_id
-              FROM user_group_members
-             WHERE group_id = ? AND user_id IN ({placeholders})
-            """,
-            (group_id, *user_ids),
-        ).fetchall()
-        existing_user_ids = {int(row["user_id"]) for row in existing_rows}
+        existing_user_ids = set(
+            session.scalars(
+                select(UserGroupMember.user_id).where(
+                    UserGroupMember.group_id == group_id,
+                    UserGroupMember.user_id.in_(user_ids),
+                )
+            ).all()
+        )
         new_user_ids = [user_id for user_id in user_ids if user_id not in existing_user_ids]
         if not new_user_ids:
             raise GroupError("所选用户已经在组内", 409)
 
         now = utc_timestamp()
-        try:
-            conn.executemany(
-                """
-                INSERT INTO user_group_members (
-                    group_id, user_id, member_role, added_by, created_at, updated_at
+        session.add_all(
+            [
+                UserGroupMember(
+                    group_id=group_id,
+                    user_id=user_id,
+                    member_role=requested_role,
+                    added_by=int(actor["id"]),
+                    created_at=now,
+                    updated_at=now,
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (group_id, user_id, requested_role, actor["id"], now, now)
-                    for user_id in new_user_ids
-                ],
-            )
-        except sqlite3.IntegrityError as exc:
-            raise GroupError("添加用户组成员失败", 409) from exc
-        conn.execute(
-            "UPDATE user_groups SET updated_at = ? WHERE id = ?",
-            (now, group_id),
+                for user_id in new_user_ids
+            ]
         )
-        updated = _fetch_group(conn, group_id)
-        return _group_payload(conn, updated, actor)
+        group.updated_at = now
+        try:
+            session.flush()
+        except IntegrityError as exc:
+            raise GroupError("添加用户组成员失败", 409) from exc
+        return _group_payload(session, group, actor)
 
 
 def _ensure_not_last_group_admin(
-    conn: sqlite3.Connection,
+    session: Session,
     group_id: int,
     user_id: int,
-) -> None:
-    member = conn.execute(
-        """
-        SELECT member_role
-          FROM user_group_members
-         WHERE group_id = ? AND user_id = ?
-        """,
-        (group_id, user_id),
-    ).fetchone()
+) -> UserGroupMember:
+    member = session.get(UserGroupMember, (group_id, user_id))
     if member is None:
         raise GroupError("该用户不在组内", 404)
-    if member["member_role"] != "admin":
-        return
-    admin_count = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-          FROM user_group_members
-         WHERE group_id = ? AND member_role = 'admin'
-        """,
-        (group_id,),
-    ).fetchone()["count"]
-    if admin_count <= 1:
+    if member.member_role != "admin":
+        return member
+    admin_count = session.scalar(
+        select(func.count()).select_from(UserGroupMember).where(
+            UserGroupMember.group_id == group_id,
+            UserGroupMember.member_role == "admin",
+        )
+    )
+    if int(admin_count or 0) <= 1:
         raise GroupError("用户组至少需要保留一名组管理员", 409)
+    return member
 
 
 @with_group_write_lock
@@ -371,26 +342,21 @@ def update_group_member(
     role = str(payload.get("groupRole") or "").strip().lower()
     if role not in GROUP_ROLES:
         raise GroupError("组内角色无效")
-    with get_connection() as conn:
-        _require_group_manager(conn, group_id, actor)
-        if role == "member":
-            _ensure_not_last_group_admin(conn, group_id, user_id)
-        cursor = conn.execute(
-            """
-            UPDATE user_group_members
-               SET member_role = ?, updated_at = ?
-             WHERE group_id = ? AND user_id = ?
-            """,
-            (role, utc_timestamp(), group_id, user_id),
+    with session_scope() as session:
+        group, _actor_role = _require_group_manager(session, group_id, actor)
+        member = (
+            _ensure_not_last_group_admin(session, group_id, user_id)
+            if role == "member"
+            else session.get(UserGroupMember, (group_id, user_id))
         )
-        if cursor.rowcount == 0:
+        if member is None:
             raise GroupError("该用户不在组内", 404)
-        conn.execute(
-            "UPDATE user_groups SET updated_at = ? WHERE id = ?",
-            (utc_timestamp(), group_id),
-        )
-        updated = _fetch_group(conn, group_id)
-        return _group_payload(conn, updated, actor)
+        now = utc_timestamp()
+        member.member_role = role
+        member.updated_at = now
+        group.updated_at = now
+        session.flush()
+        return _group_payload(session, group, actor)
 
 
 @with_group_write_lock
@@ -399,40 +365,29 @@ def remove_group_member(
     user_id: int,
     actor: dict[str, Any],
 ) -> dict[str, Any]:
-    with get_connection() as conn:
-        _require_group_manager(conn, group_id, actor)
-        _ensure_not_last_group_admin(conn, group_id, user_id)
-        cursor = conn.execute(
-            "DELETE FROM user_group_members WHERE group_id = ? AND user_id = ?",
-            (group_id, user_id),
-        )
-        if cursor.rowcount == 0:
-            raise GroupError("该用户不在组内", 404)
-        conn.execute(
-            "UPDATE user_groups SET updated_at = ? WHERE id = ?",
-            (utc_timestamp(), group_id),
-        )
-        updated = _fetch_group(conn, group_id)
-        return _group_payload(conn, updated, actor)
+    with session_scope() as session:
+        group, _actor_role = _require_group_manager(session, group_id, actor)
+        member = _ensure_not_last_group_admin(session, group_id, user_id)
+        session.delete(member)
+        group.updated_at = utc_timestamp()
+        session.flush()
+        return _group_payload(session, group, actor)
 
 
 def resolve_group_attendee_emails(
-    conn: sqlite3.Connection,
+    session: Session,
     group_id: int,
     actor: dict[str, Any],
 ) -> list[str]:
-    _require_group_visibility(conn, group_id, actor)
-    rows = conn.execute(
-        """
-        SELECT u.email
-          FROM user_group_members gm
-          JOIN users u ON u.id = gm.user_id
-         WHERE gm.group_id = ? AND u.status = 'active'
-         ORDER BY
-               CASE gm.member_role WHEN 'admin' THEN 0 ELSE 1 END,
-               u.display_name COLLATE NOCASE ASC,
-               u.username COLLATE NOCASE ASC
-        """,
-        (group_id,),
-    ).fetchall()
-    return [str(row["email"]).strip() for row in rows if str(row["email"] or "").strip()]
+    _require_group_visibility(session, group_id, actor)
+    rows = session.execute(
+        select(User.email)
+        .join(UserGroupMember, User.id == UserGroupMember.user_id)
+        .where(UserGroupMember.group_id == group_id, User.status == "active")
+        .order_by(
+            case((UserGroupMember.member_role == "admin", 0), else_=1),
+            func.lower(User.display_name),
+            func.lower(User.username),
+        )
+    ).scalars()
+    return [email.strip() for email in rows if email and email.strip()]
